@@ -15,6 +15,26 @@ async function init(): Promise<void> {
   const settings = await getSettings();
   setForm(settings);
 
+  provider?.addEventListener("change", () => {
+    void saveCurrentForm();
+  });
+
+  model?.addEventListener("change", () => {
+    void saveCurrentForm();
+  });
+
+  model?.addEventListener("blur", () => {
+    void saveCurrentForm();
+  });
+
+  proxyUrl?.addEventListener("change", () => {
+    void saveCurrentForm();
+  });
+
+  proxyUrl?.addEventListener("blur", () => {
+    void saveCurrentForm();
+  });
+
   toggle?.addEventListener("click", () => {
     void saveAndToggle();
   });
@@ -26,6 +46,12 @@ async function init(): Promise<void> {
   login?.addEventListener("click", () => {
     void startCodexLogin();
   });
+}
+
+async function saveCurrentForm(): Promise<void> {
+  const settings = readForm();
+  await saveSettings(settings);
+  setStatus(`Saved. Model: ${settings.model ?? "default"}.`);
 }
 
 async function startCodexLogin(): Promise<void> {

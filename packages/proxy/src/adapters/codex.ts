@@ -30,7 +30,7 @@ export class CodexAdapter implements ModelAdapter {
   constructor(private readonly config: ProxyConfig) {}
 
   async listModels(): Promise<string[]> {
-    return [this.config.openaiModel];
+    return ["gpt-5.1-codex-mini", "gpt-5.1-codex", "gpt-5.1-codex-max"];
   }
 
   async authStatus(): Promise<{ loggedIn: boolean; detail: string }> {
@@ -59,6 +59,7 @@ export class CodexAdapter implements ModelAdapter {
 
   async translate(request: TranslateRequest): Promise<TranslateResponse> {
     const model = request.model ?? this.config.openaiModel;
+    const modelArgs = model === "default" ? [] : ["-m", model];
     const expectedIds = new Set(request.segments.map((segment) => segment.id));
     const tempDir = await mkdtemp(join(tmpdir(), "translate-bot-codex-"));
     const schemaPath = join(tempDir, "schema.json");
@@ -78,8 +79,7 @@ export class CodexAdapter implements ModelAdapter {
         "--ephemeral",
         "--sandbox",
         "read-only",
-        "-m",
-        model,
+        ...modelArgs,
         "--output-schema",
         schemaPath,
         "--output-last-message",

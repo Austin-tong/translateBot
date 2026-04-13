@@ -15,8 +15,8 @@
   "commands": {
     "toggle-translation": {
       "suggested_key": {
-        "default": "Ctrl+Shift+Y",
-        "mac": "Command+Shift+Y"
+        "default": "Alt+A",
+        "mac": "Alt+A"
       },
       "description": "Toggle translation on the current page."
     }

@@ -22,7 +22,8 @@ export async function saveSettings(settings: ExtensionSettings): Promise<void> {
 
 function normalizeSettings(raw: Partial<ExtensionSettings>): ExtensionSettings {
   const provider = raw.provider === "lmstudio" ? "lmstudio" : "openai";
-  const model = typeof raw.model === "string" && raw.model.trim() ? raw.model.trim() : undefined;
+  const rawModel = typeof raw.model === "string" ? raw.model.trim() : "";
+  const model = rawModel && rawModel !== "default" ? rawModel : undefined;
   const proxyUrl = typeof raw.proxyUrl === "string" && raw.proxyUrl.trim() ? raw.proxyUrl.trim().replace(/\/$/, "") : DEFAULT_SETTINGS.proxyUrl;
   return { provider, model, proxyUrl };
 }

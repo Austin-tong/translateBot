@@ -45,7 +45,7 @@ vi.mock("node:child_process", () => ({
 const config: ProxyConfig = {
   host: "127.0.0.1",
   port: 8787,
-  openaiModel: "gpt-5.4-mini",
+  openaiModel: "default",
   codexCommand: "codex",
   lmstudioBaseUrl: "http://localhost:1234/v1",
   lmstudioModel: "local-model",
@@ -77,10 +77,19 @@ describe("model adapters", () => {
     expect(call?.args).toContain("exec");
     expect(call?.args).toContain("--ephemeral");
     expect(call?.args).toContain("read-only");
-    expect(call?.args).toContain("gpt-5.4-mini");
+    expect(call?.args).not.toContain("-m");
+    expect(call?.args).not.toContain("gpt-5.1-codex-mini");
     expect(call?.stdin).toContain("Hello world.");
     expect(call?.stdin).not.toContain("sk-");
     expect(response.segments).toEqual([{ id: "s1", translation: "你好，世界。" }]);
+  });
+
+  it("passes an explicit Codex model when the user overrides default", async () => {
+    await new CodexAdapter(config).translate({ ...request, model: "gpt-5.1-codex-mini" });
+
+    const call = spawnState.calls[0];
+    expect(call?.args).toContain("-m");
+    expect(call?.args).toContain("gpt-5.1-codex-mini");
   });
 
   it("reports Codex ChatGPT login status", async () => {
@@ -89,6 +98,14 @@ describe("model adapters", () => {
 
     expect(spawnState.calls[0]?.args).toEqual(["login", "status"]);
     expect(status.loggedIn).toBe(true);
+  });
+
+  it("lists the Codex model family choices used by the popup", async () => {
+    await expect(new CodexAdapter(config).listModels()).resolves.toEqual([
+      "gpt-5.1-codex-mini",
+      "gpt-5.1-codex",
+      "gpt-5.1-codex-max"
+    ]);
   });
 
   it("sends LM Studio requests to the configured local base URL", async () => {

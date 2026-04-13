@@ -47,7 +47,11 @@ const server = createServer(async (request, response) => {
 
     if (request.method === "POST" && url.pathname === "/translate") {
       const body = validateTranslateRequest(await readJson(request));
+      const startedAt = Date.now();
+      const requestedModel = body.model ?? (body.provider === "openai" ? config.openaiModel : config.lmstudioModel);
+      console.log(`[translate-bot] translate request provider=${body.provider} model=${requestedModel} segments=${body.segments.length} url=${body.page.url}`);
       const translated = await adapters[body.provider].translate(body);
+      console.log(`[translate-bot] translate response provider=${translated.provider} model=${translated.model} segments=${translated.segments.length} durationMs=${Date.now() - startedAt}`);
       sendJson(response, 200, translated);
       return;
     }
@@ -101,8 +105,8 @@ function validateTranslateRequest(raw: unknown): TranslateRequest {
   if (!request.page || typeof request.page.url !== "string" || typeof request.page.title !== "string") {
     throw new Error("Invalid page context.");
   }
-  if (!Array.isArray(request.segments) || request.segments.length === 0 || request.segments.length > 40) {
-    throw new Error("segments must include 1 to 40 items.");
+  if (!Array.isArray(request.segments) || request.segments.length === 0 || request.segments.length > 100) {
+    throw new Error("segments must include 1 to 100 items.");
   }
   for (const segment of request.segments) {
     if (!segment || typeof segment.id !== "string" || typeof segment.text !== "string" || segment.text.trim().length === 0) {
