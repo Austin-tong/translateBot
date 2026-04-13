@@ -1,0 +1,29 @@
+{
+  "name": "translate-bot",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "vitest run",
+    "test:e2e:extension": "npm run build:extension && node scripts/e2e-extension-smoke.mjs",
+    "test:watch": "vitest",
+    "dev:proxy": "npm run dev -w @translate-bot/proxy",
+    "build:extension": "npm run build -w @translate-bot/extension",
+    "build:proxy": "npm run build -w @translate-bot/proxy",
+    "check": "npm run build && npm test"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.287",
+    "@types/node": "^22.10.2",
+    "esbuild": "^0.28.0",
+    "jsdom": "^25.0.1",
+    "playwright-core": "^1.59.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.4"
+  }
+}

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Translate Bot</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Translate Bot</h1>
+      <p id="status">Ready.</p>
+
+      <label>
+        Provider
+        <select id="provider">
+          <option value="openai">OpenAI via Codex</option>
+          <option value="lmstudio">LM Studio</option>
+        </select>
+      </label>
+
+      <label>
+        Model
+        <input id="model" placeholder="Use proxy default" />
+      </label>
+
+      <label>
+        Proxy URL
+        <input id="proxyUrl" value="http://127.0.0.1:8787" />
+      </label>
+
+      <div class="actions">
+        <button id="toggle">Translate page</button>
+        <button id="health" type="button">Check proxy</button>
+      </div>
+      <button id="login" type="button" class="secondary">Open Codex login</button>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

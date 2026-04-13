@@ -1,0 +1,10 @@
+{
+  "name": "@translate-bot/extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node ../../scripts/build-extension.mjs",
+    "test": "vitest run packages/extension"
+  }
+}

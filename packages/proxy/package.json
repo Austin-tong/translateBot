@@ -1,0 +1,15 @@
+{
+  "name": "@translate-bot/proxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "test": "vitest run packages/proxy"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7"
+  }
+}
