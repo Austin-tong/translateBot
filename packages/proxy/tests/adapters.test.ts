@@ -1,56 +1,33 @@
-import { EventEmitter } from "node:events";
-import { writeFile } from "node:fs/promises";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CodexAdapter } from "../src/adapters/codex.js";
 import { LMStudioAdapter } from "../src/adapters/lmstudio.js";
+import { OllamaAdapter } from "../src/adapters/ollama.js";
 import type { ProxyConfig, TranslateRequest } from "../src/types.js";
 
-const spawnState = vi.hoisted(() => ({
-  calls: [] as Array<{ command: string; args: string[]; stdin: string }>,
-  mode: "translate" as "translate" | "status"
+const aiState = vi.hoisted(() => ({
+  complete: vi.fn(),
+  loginOpenAICodex: vi.fn(),
+  refreshOpenAICodexToken: vi.fn(),
+  spawn: vi.fn()
+}));
+
+vi.mock("@mariozechner/pi-ai", () => ({
+  complete: aiState.complete
+}));
+
+vi.mock("@mariozechner/pi-ai/oauth", () => ({
+  loginOpenAICodex: aiState.loginOpenAICodex,
+  refreshOpenAICodexToken: aiState.refreshOpenAICodexToken
 }));
 
 vi.mock("node:child_process", () => ({
-  spawn: vi.fn((command: string, args: string[]) => {
-    const child = new EventEmitter() as EventEmitter & {
-      stdout: EventEmitter & { setEncoding: (encoding: string) => void };
-      stderr: EventEmitter & { setEncoding: (encoding: string) => void };
-      stdin: { end: (input: string) => void };
-      kill: (signal: string) => void;
-    };
-    child.stdout = new EventEmitter() as EventEmitter & { setEncoding: (encoding: string) => void };
-    child.stderr = new EventEmitter() as EventEmitter & { setEncoding: (encoding: string) => void };
-    child.stdout.setEncoding = () => undefined;
-    child.stderr.setEncoding = () => undefined;
-    child.kill = () => undefined;
-    child.stdin = {
-      end: (input: string) => {
-        spawnState.calls.push({ command, args, stdin: input });
-        queueMicrotask(async () => {
-          if (spawnState.mode === "status") {
-            child.stdout.emit("data", "Logged in using ChatGPT\n");
-            child.emit("close", 0);
-            return;
-          }
-          const outputPath = args[args.indexOf("--output-last-message") + 1];
-          await writeFile(outputPath, '{"segments":[{"id":"s1","translation":"你好，世界。"}]}', "utf8");
-          child.emit("close", 0);
-        });
-      }
-    };
-    return child;
-  })
+  spawn: aiState.spawn
 }));
 
-const config: ProxyConfig = {
-  host: "127.0.0.1",
-  port: 8787,
-  openaiModel: "default",
-  codexCommand: "codex",
-  lmstudioBaseUrl: "http://localhost:1234/v1",
-  lmstudioModel: "local-model",
-  requestTimeoutMs: 1000
-};
+let tempDir: string;
 
 const request: TranslateRequest = {
   provider: "openai",
@@ -63,49 +40,96 @@ const request: TranslateRequest = {
 };
 
 describe("model adapters", () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-    spawnState.calls = [];
-    spawnState.mode = "translate";
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "translate-bot-test-"));
+    aiState.spawn.mockReturnValue({ unref: vi.fn() });
+    aiState.complete.mockResolvedValue({
+      role: "assistant",
+      content: [{ type: "text", text: '{"segments":[{"id":"s1","translation":"你好，世界。"}]}' }],
+      api: "openai-codex-responses",
+      provider: "openai-codex",
+      model: "gpt-5.4-mini",
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "stop",
+      timestamp: Date.now()
+    });
   });
 
-  it("uses Codex CLI auth flow for OpenAI instead of an API key", async () => {
+  afterEach(async () => {
+    vi.clearAllMocks();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("uses the long-running OpenAI Codex OAuth adapter instead of Codex CLI", async () => {
+    const config = makeConfig();
+    await writeAuth(config);
+
     const response = await new CodexAdapter(config).translate(request);
 
-    const call = spawnState.calls[0];
-    expect(call?.command).toBe("codex");
-    expect(call?.args).toContain("exec");
-    expect(call?.args).toContain("--ephemeral");
-    expect(call?.args).toContain("read-only");
-    expect(call?.args).not.toContain("-m");
-    expect(call?.args).not.toContain("gpt-5.1-codex-mini");
-    expect(call?.stdin).toContain("Hello world.");
-    expect(call?.stdin).not.toContain("sk-");
+    expect(aiState.complete).toHaveBeenCalledWith(
+      expect.objectContaining({ api: "openai-codex-responses", provider: "openai-codex", id: "gpt-5.4-mini" }),
+      expect.objectContaining({ messages: [expect.objectContaining({ content: expect.stringContaining("Hello world.") })] }),
+      expect.objectContaining({ apiKey: "access-token", transport: "sse", reasoningEffort: "low" })
+    );
+    expect(aiState.spawn).not.toHaveBeenCalled();
     expect(response.segments).toEqual([{ id: "s1", translation: "你好，世界。" }]);
   });
 
   it("passes an explicit Codex model when the user overrides default", async () => {
-    await new CodexAdapter(config).translate({ ...request, model: "gpt-5.1-codex-mini" });
+    const config = makeConfig();
+    await writeAuth(config);
 
-    const call = spawnState.calls[0];
-    expect(call?.args).toContain("-m");
-    expect(call?.args).toContain("gpt-5.1-codex-mini");
+    await new CodexAdapter(config).translate({ ...request, model: "gpt-5.4" });
+
+    expect(aiState.complete.mock.calls[0]?.[0]).toEqual(expect.objectContaining({ id: "gpt-5.4" }));
   });
 
-  it("reports Codex ChatGPT login status", async () => {
-    spawnState.mode = "status";
+  it("reports OAuth status from the proxy credential store", async () => {
+    const config = makeConfig();
+    await writeAuth(config);
+
     const status = await new CodexAdapter(config).authStatus();
 
-    expect(spawnState.calls[0]?.args).toEqual(["login", "status"]);
     expect(status.loggedIn).toBe(true);
+    expect(status.detail).toContain("OpenAI Codex OAuth is ready");
   });
 
-  it("lists the Codex model family choices used by the popup", async () => {
-    await expect(new CodexAdapter(config).listModels()).resolves.toEqual([
-      "gpt-5.1-codex-mini",
-      "gpt-5.1-codex",
-      "gpt-5.1-codex-max"
-    ]);
+  it("refreshes expired OpenAI Codex OAuth credentials before translating", async () => {
+    const config = makeConfig();
+    await writeAuth(config, { access: "old-access", refresh: "refresh-token", expires: Date.now() - 1000 });
+    aiState.refreshOpenAICodexToken.mockResolvedValue({
+      access: "new-access",
+      refresh: "new-refresh",
+      expires: Date.now() + 60_000,
+      accountId: "acct"
+    });
+
+    await new CodexAdapter(config).translate(request);
+
+    expect(aiState.refreshOpenAICodexToken).toHaveBeenCalledWith("refresh-token");
+    expect(aiState.complete.mock.calls[0]?.[2]).toEqual(expect.objectContaining({ apiKey: "new-access" }));
+    expect(await readFile(config.openaiCodexAuthPath, "utf8")).toContain("new-refresh");
+  });
+
+  it("starts browser OAuth and saves the returned credentials", async () => {
+    const config = makeConfig();
+    aiState.loginOpenAICodex.mockImplementation(async ({ onAuth }) => {
+      onAuth({ url: "https://auth.openai.com/oauth/authorize?example=1" });
+      return { access: "oauth-access", refresh: "oauth-refresh", expires: Date.now() + 60_000, accountId: "acct" };
+    });
+
+    const result = await new CodexAdapter(config).startAuth();
+
+    expect(result.started).toBe(true);
+    expect(result.authUrl).toContain("auth.openai.com");
+    expect(aiState.spawn).toHaveBeenCalled();
+    await vi.waitFor(async () => {
+      expect(await readFile(config.openaiCodexAuthPath, "utf8")).toContain("oauth-refresh");
+    });
+  });
+
+  it("lists the Codex OAuth model family choices used by the popup", async () => {
+    await expect(new CodexAdapter(makeConfig()).listModels()).resolves.toContain("gpt-5.4-mini");
   });
 
   it("sends LM Studio requests to the configured local base URL", async () => {
@@ -114,10 +138,93 @@ describe("model adapters", () => {
     }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const response = await new LMStudioAdapter(config).translate({ ...request, provider: "lmstudio" });
+    const response = await new LMStudioAdapter(makeConfig()).translate({ ...request, provider: "lmstudio" });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:1234/v1/chat/completions");
     expect(response.model).toBe("local-model");
     expect(response.segments[0]?.id).toBe("s1");
   });
+
+  it("sends Ollama requests to the configured local chat endpoint", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      model: "gemma4:e2b",
+      message: { content: '{"segments":[{"id":"s1","translation":"你好，世界。"}]}' },
+      prompt_eval_count: 10,
+      eval_count: 6
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await new OllamaAdapter(makeConfig()).translate({ ...request, provider: "ollama" });
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { model?: string; stream?: boolean; think?: boolean; format?: string; messages?: Array<{ content?: string }> };
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:11434/api/chat");
+    expect(body.model).toBe("gemma4:e2b");
+    expect(body.stream).toBe(false);
+    expect(body.think).toBe(false);
+    expect(body.format).toBe("json");
+    expect(body.messages?.[1]?.content).toContain("/no_think");
+    expect(response.provider).toBe("ollama");
+    expect(response.segments[0]?.translation).toBe("你好，世界。");
+  });
+
+  it("strips leaked Ollama thinking blocks before parsing JSON", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      model: "gemma4:e2b",
+      message: { content: '<think>I should translate.</think>{"segments":[{"id":"s1","translation":"你好，世界。"}]}' }
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await new OllamaAdapter(makeConfig()).translate({ ...request, provider: "ollama" });
+
+    expect(response.segments).toEqual([{ id: "s1", translation: "你好，世界。" }]);
+  });
+
+  it("lists Ollama local tags as model choices", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      models: [{ name: "gemma4:e2b" }, { model: "qwen3:8b" }]
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new OllamaAdapter(makeConfig()).listModels()).resolves.toEqual(["gemma4:e2b", "qwen3:8b"]);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:11434/api/tags");
+  });
+
+  it("maps the user's hyphenated Gemma shorthand to the Ollama model tag", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      model: "gemma4:e2b",
+      message: { content: '{"segments":[{"id":"s1","translation":"你好，世界。"}]}' }
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await new OllamaAdapter(makeConfig()).translate({ ...request, provider: "ollama", model: "gemma4-e2b" });
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { model?: string };
+
+    expect(body.model).toBe("gemma4:e2b");
+  });
 });
+
+function makeConfig(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
+  return {
+    host: "127.0.0.1",
+    port: 8787,
+    openaiModel: "default",
+    openaiCodexAuthPath: join(tempDir, "oauth.json"),
+    lmstudioBaseUrl: "http://localhost:1234/v1",
+    lmstudioModel: "local-model",
+    ollamaBaseUrl: "http://localhost:11434",
+    ollamaModel: "gemma4:e2b",
+    requestTimeoutMs: 1000,
+    ...overrides
+  };
+}
+
+async function writeAuth(config: ProxyConfig, overrides: Partial<{ access: string; refresh: string; expires: number; accountId: string }> = {}): Promise<void> {
+  await mkdir(dirname(config.openaiCodexAuthPath), { recursive: true });
+  await writeFile(config.openaiCodexAuthPath, JSON.stringify({
+    access: "access-token",
+    refresh: "refresh-token",
+    expires: Date.now() + 600_000,
+    accountId: "acct",
+    ...overrides
+  }), "utf8");
+}

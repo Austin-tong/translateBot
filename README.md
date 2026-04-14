@@ -1,6 +1,6 @@
 # Translate Bot
 
-Local Chrome/Chromium page translation extension with a Node proxy for OpenAI and LM Studio models.
+Local Chrome/Chromium page translation extension with a Node proxy for Ollama, OpenAI, and LM Studio models.
 
 ## Install
 
@@ -10,18 +10,15 @@ npm run build
 cp packages/proxy/.env.example packages/proxy/.env
 ```
 
-For OpenAI cloud translation, this project uses Codex CLI login instead of an API key:
+For OpenAI cloud translation, this project uses OpenAI Codex OAuth in the local proxy instead of an API key or the local `codex` CLI.
 
-```bash
-codex login
-codex login status
-```
+After starting the proxy, choose `OpenAI Codex OAuth` in the extension popup and click `Open OpenAI login`. The proxy opens the browser authorization flow and stores its local OAuth token at `~/.translate-bot/openai-codex-oauth.json`; the extension never stores OpenAI credentials.
 
-That opens the browser authorization flow managed by Codex. The proxy invokes `codex exec`; it does not read or store Codex credentials or an OpenAI API key. In the extension popup, choose `OpenAI via Codex`.
-You can also click `Open Codex login` in the extension popup after starting the proxy.
-By default the proxy uses the Codex CLI default model. Leave the popup Model field empty or set `OPENAI_MODEL=default`; enter a model name only when you want to override it.
+By default the proxy maps `OPENAI_MODEL=default` to `gpt-5.4-mini`. Enter a model name in the popup only when you want to override it.
 
 For LM Studio, start the local server and load a model, then set `LMSTUDIO_MODEL` to that model id.
+
+For Ollama, start the local Ollama service and make sure the model is available. The default local provider is `Ollama`, with `OLLAMA_MODEL=gemma4:e2b`.
 
 ## Run
 

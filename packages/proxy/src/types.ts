@@ -1,4 +1,4 @@
-export type Provider = "openai" | "lmstudio";
+export type Provider = "openai" | "lmstudio" | "ollama";
 
 export interface PageContext {
   url: string;
@@ -45,8 +45,10 @@ export interface ProxyConfig {
   host: string;
   port: number;
   openaiModel: string;
-  codexCommand: string;
+  openaiCodexAuthPath: string;
   lmstudioBaseUrl: string;
   lmstudioModel: string;
+  ollamaBaseUrl: string;
+  ollamaModel: string;
   requestTimeoutMs: number;
 }

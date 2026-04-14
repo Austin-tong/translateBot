@@ -1,15 +1,17 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { loadConfig } from "./config.js";
 import { LMStudioAdapter } from "./adapters/lmstudio.js";
+import { OllamaAdapter } from "./adapters/ollama.js";
 import { CodexAdapter } from "./adapters/codex.js";
 import type { AuthAwareModelAdapter, ModelAdapter, Provider, TranslateRequest } from "./types.js";
 
 const config = loadConfig();
 const codexAdapter = new CodexAdapter(config);
-// provider=openai 实际走 Codex CLI 登录态；provider=lmstudio 走本机 LM Studio OpenAI-compatible API。
+// provider=openai 走长驻 proxy 内的 OpenAI Codex OAuth；provider=lmstudio/ollama 走本机模型服务。
 const adapters: Record<Provider, ModelAdapter> = {
   openai: codexAdapter,
-  lmstudio: new LMStudioAdapter(config)
+  lmstudio: new LMStudioAdapter(config),
+  ollama: new OllamaAdapter(config)
 };
 
 const server = createServer(async (request, response) => {
@@ -24,7 +26,14 @@ const server = createServer(async (request, response) => {
 
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
     if (request.method === "GET" && url.pathname === "/health") {
-      sendJson(response, 200, { ok: true, openaiAuth: "codex", codexCommand: config.codexCommand, lmstudioBaseUrl: config.lmstudioBaseUrl });
+      sendJson(response, 200, {
+        ok: true,
+        openaiAuth: "codex-oauth",
+        openaiModel: config.openaiModel,
+        lmstudioBaseUrl: config.lmstudioBaseUrl,
+        ollamaBaseUrl: config.ollamaBaseUrl,
+        ollamaModel: config.ollamaModel
+      });
       return;
     }
 
@@ -48,10 +57,10 @@ const server = createServer(async (request, response) => {
     if (request.method === "POST" && url.pathname === "/translate") {
       const body = validateTranslateRequest(await readJson(request));
       const startedAt = Date.now();
-      const requestedModel = body.model ?? (body.provider === "openai" ? config.openaiModel : config.lmstudioModel);
-      console.log(`[translate-bot] translate request provider=${body.provider} model=${requestedModel} segments=${body.segments.length} url=${body.page.url}`);
+      const requestedModel = body.model ?? defaultModelForProvider(body.provider);
+      console.log(`[translate-bot] translate request provider=${body.provider} model=${requestedModel} segments=${body.segments.length} ids=${formatIds(body.segments.map((segment) => segment.id))} sample=${formatSegmentSample(body.segments)} url=${body.page.url}`);
       const translated = await adapters[body.provider].translate(body);
-      console.log(`[translate-bot] translate response provider=${translated.provider} model=${translated.model} segments=${translated.segments.length} durationMs=${Date.now() - startedAt}`);
+      console.log(`[translate-bot] translate response provider=${translated.provider} model=${translated.model} segments=${translated.segments.length} ids=${formatIds(translated.segments.map((segment) => segment.id))} durationMs=${Date.now() - startedAt}`);
       sendJson(response, 200, translated);
       return;
     }
@@ -79,8 +88,32 @@ function sendJson(response: ServerResponse, statusCode: number, payload: unknown
 }
 
 function parseProvider(raw: string | null): Provider {
-  if (raw === "openai" || raw === "lmstudio") return raw;
-  throw new Error("provider must be openai or lmstudio.");
+  if (raw === "openai" || raw === "lmstudio" || raw === "ollama") return raw;
+  throw new Error("provider must be openai, lmstudio, or ollama.");
+}
+
+function defaultModelForProvider(provider: Provider): string {
+  if (provider === "openai") return config.openaiModel;
+  if (provider === "lmstudio") return config.lmstudioModel;
+  return config.ollamaModel;
+}
+
+function formatIds(ids: string[]): string {
+  const head = ids.slice(0, 12).join(",");
+  return ids.length > 12 ? `${head},...` : head;
+}
+
+function formatSegmentSample(segments: TranslateRequest["segments"]): string {
+  // 日志只保留短预览，方便排查 segment 是否发出，同时避免把整页正文刷满终端。
+  return JSON.stringify(segments.slice(0, 3).map((segment) => ({
+    id: segment.id,
+    text: previewText(segment.text)
+  })));
+}
+
+function previewText(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  return normalized.length > 120 ? `${normalized.slice(0, 117)}...` : normalized;
 }
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
@@ -100,7 +133,7 @@ function validateTranslateRequest(raw: unknown): TranslateRequest {
   // 代理边界做最小结构校验，避免把不完整请求直接传给模型 adapter。
   if (!raw || typeof raw !== "object") throw new Error("Invalid request body.");
   const request = raw as Partial<TranslateRequest>;
-  if (request.provider !== "openai" && request.provider !== "lmstudio") throw new Error("Invalid provider.");
+  if (request.provider !== "openai" && request.provider !== "lmstudio" && request.provider !== "ollama") throw new Error("Invalid provider.");
   if (request.targetLanguage !== "zh-CN") throw new Error("Only zh-CN targetLanguage is supported.");
   if (!request.page || typeof request.page.url !== "string" || typeof request.page.title !== "string") {
     throw new Error("Invalid page context.");

@@ -16,6 +16,7 @@ async function init(): Promise<void> {
   setForm(settings);
 
   provider?.addEventListener("change", () => {
+    clearIncompatibleModelForProvider();
     void saveCurrentForm();
   });
 
@@ -51,7 +52,10 @@ async function init(): Promise<void> {
 async function saveCurrentForm(): Promise<void> {
   const settings = readForm();
   await saveSettings(settings);
-  setStatus(`Saved. Model: ${settings.model ?? "default"}.`);
+  const saved = await getSettings();
+  console.info("[Translate Bot] popup saved settings", settingsLogPayload(saved));
+  const update = await notifySettingsChanged(saved);
+  setStatus(`Saved. Provider: ${saved.provider}. Model: ${saved.model ?? "default"}.${formatUpdateStatus(update)}`);
 }
 
 async function startCodexLogin(): Promise<void> {
@@ -60,22 +64,24 @@ async function startCodexLogin(): Promise<void> {
   try {
     const response = await fetch(`${settings.proxyUrl}/auth/openai/start`, { method: "POST" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    setStatus("Codex login started. Complete the browser authorization flow.");
+    setStatus("OpenAI Codex login started. Complete the browser authorization flow.");
   } catch (error) {
     const message = error instanceof Error ? error.message : "unknown error";
-    setStatus(`Could not start Codex login: ${message}`);
+    setStatus(`Could not start OpenAI Codex login: ${message}`);
   }
 }
 
 async function saveAndToggle(): Promise<void> {
   const settings = readForm();
   await saveSettings(settings);
-  setStatus("Starting translation...");
+  const saved = await getSettings();
+  console.info("[Translate Bot] popup toggle settings", settingsLogPayload(saved));
+  setStatus(`Starting translation with ${saved.provider} / ${saved.model ?? "default"}...`);
   const result = await chrome.runtime.sendMessage<BackgroundMessage, { ok: boolean; error?: string }>({
     type: "TOGGLE_TRANSLATION",
-    settings
+    settings: saved
   });
-  setStatus(result?.ok ? "Translation toggled." : result?.error ?? "Could not start translation.");
+  setStatus(result?.ok ? `Translation toggled with ${saved.provider} / ${saved.model ?? "default"}.` : result?.error ?? "Could not start translation.");
 }
 
 async function checkProxy(): Promise<void> {
@@ -84,11 +90,25 @@ async function checkProxy(): Promise<void> {
   try {
     const response = await fetch(`${settings.proxyUrl}/health`);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const body = (await response.json()) as { openaiAuth?: string; codexCommand?: string; lmstudioBaseUrl?: string };
-    setStatus(`Proxy ready. OpenAI auth: ${body.openaiAuth ?? "unknown"}.`);
+    const body = (await response.json()) as { openaiAuth?: string; openaiModel?: string; lmstudioBaseUrl?: string; ollamaModel?: string; ollamaBaseUrl?: string };
+    setStatus(`Proxy ready. OpenAI auth: ${body.openaiAuth ?? "unknown"}. Ollama: ${body.ollamaModel ?? "unknown"}.`);
   } catch (error) {
     const message = error instanceof Error ? error.message : "unknown error";
     setStatus(`Proxy unavailable: ${message}`);
+  }
+}
+
+async function notifySettingsChanged(settings: ExtensionSettings): Promise<{ provider?: string; model?: string } | undefined> {
+  try {
+    const response = await chrome.runtime.sendMessage<BackgroundMessage, { ok: boolean; error?: string; status?: { provider?: string; model?: string } }>({
+      type: "UPDATE_TRANSLATION_SETTINGS",
+      settings
+    });
+    console.info("[Translate Bot] popup settings update response", response);
+    return response?.status;
+  } catch {
+    // popup 保存是主路径；当前 tab 未注入 content script 时无需打扰用户。
+    return undefined;
   }
 }
 
@@ -99,8 +119,9 @@ function setForm(settings: ExtensionSettings): void {
 }
 
 function readForm(): ExtensionSettings {
+  const rawProvider = provider?.value;
   return {
-    provider: provider?.value === "lmstudio" ? "lmstudio" : "openai",
+    provider: rawProvider === "openai" || rawProvider === "lmstudio" || rawProvider === "ollama" ? rawProvider : "ollama",
     model: model?.value.trim() || undefined,
     proxyUrl: (proxyUrl?.value.trim() || "http://127.0.0.1:8787").replace(/\/$/, "")
   };
@@ -108,4 +129,24 @@ function readForm(): ExtensionSettings {
 
 function setStatus(message: string): void {
   if (status) status.textContent = message;
+}
+
+function clearIncompatibleModelForProvider(): void {
+  if (!provider || !model) return;
+  const currentModel = model.value.trim();
+  if (provider.value === "ollama" && /^gpt-/i.test(currentModel)) model.value = "";
+  if (provider.value === "openai" && /^(gemma|qwen|llama|mistral|deepseek)/i.test(currentModel)) model.value = "";
+}
+
+function formatUpdateStatus(statusResponse: { provider?: string; model?: string } | undefined): string {
+  if (!statusResponse?.provider) return "";
+  return ` Active page: ${statusResponse.provider} / ${statusResponse.model ?? "default"}.`;
+}
+
+function settingsLogPayload(settings: ExtensionSettings): Record<string, string> {
+  return {
+    provider: settings.provider,
+    model: settings.model ?? "default",
+    proxyUrl: settings.proxyUrl
+  };
 }

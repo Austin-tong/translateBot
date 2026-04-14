@@ -4,11 +4,22 @@ import type { ExtensionSettings } from "./settings.js";
 const RECORD_ATTR = "data-translate-bot-id";
 const TRANSLATION_ATTR = "data-translate-bot-translation";
 const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "SVG", "CANVAS", "INPUT", "TEXTAREA", "SELECT", "PRE", "CODE", "BUTTON"]);
+const SKIP_ANCESTOR_SELECTOR = "form";
+const UI_LABEL_ANCESTOR_SELECTOR = "button, nav, [role='button'], [role='navigation'], [role='menuitem'], [role='tab']";
+const UI_LABEL_TAGS = new Set(["SPAN", "A", "BUTTON"]);
 const BLOCK_TRANSLATION_TAGS = new Set(["P", "LI", "DD", "DT", "BLOCKQUOTE", "FIGCAPTION", "SUMMARY", "H1", "H2", "H3", "H4", "H5", "H6"]);
 const CONTAINER_TAGS = new Set(["ARTICLE", "ASIDE", "BODY", "FOOTER", "FORM", "HEADER", "MAIN", "NAV", "OL", "SECTION", "TABLE", "TBODY", "TD", "TH", "THEAD", "TR", "UL"]);
+const GENERIC_TEXT_CONTAINER_TAGS = new Set(["DIV", "ARTICLE", "SECTION"]);
 const STRUCTURAL_CHILD_TAGS = new Set([...BLOCK_TRANSLATION_TAGS, ...CONTAINER_TAGS, "DIV"]);
-const BATCH_SIZE = 40;
+const INLINE_TEXT_CHILD_TAGS = new Set(["A", "ABBR", "B", "BDI", "BDO", "BR", "CITE", "DEL", "DFN", "EM", "I", "INS", "KBD", "MARK", "Q", "S", "SMALL", "SPAN", "STRONG", "SUB", "SUP", "TIME", "U", "VAR", "WBR"]);
+const INTERACTIVE_DESCENDANT_SELECTOR = "button, [role='button'], form, nav, [role='navigation'], input, textarea, select";
+// X/Twitter 正文里常见“@grok + 英文正文”，单独 @handle 不翻译，但带上下文的整段需要翻译。
+const MENTION_RE = /(^|[\s([{"'“‘])@[A-Za-z0-9_]{1,30}\b/;
+const OPENAI_BATCH_SIZE = 40;
+const LMSTUDIO_BATCH_SIZE = 40;
+const OLLAMA_BATCH_SIZE = 8;
 const NEAR_VIEWPORT_MARGIN = 900;
+const LOG_PREFIX = "[Translate Bot]";
 
 export interface SegmentRecord {
   id: string;
@@ -17,13 +28,20 @@ export interface SegmentRecord {
   translationElement?: HTMLSpanElement;
   status: "pending" | "queued" | "translating" | "done" | "error";
   hash: string;
+  layout: "block" | "inline";
 }
 
 interface TranslateProxyResponse {
   segments: Array<{ id: string; translation: string }>;
 }
 
-class TranslationRuntime {
+interface CandidateDecision {
+  ok: boolean;
+  reason: string;
+  text: string;
+}
+
+export class TranslationRuntime {
   private enabled = false;
   private settings?: ExtensionSettings;
   private readonly records = new Map<string, SegmentRecord>();
@@ -39,15 +57,18 @@ class TranslationRuntime {
   private mutationObserver?: MutationObserver;
   private processTimer?: number;
   private discoverTimer?: number;
+  private readonly pendingDiscoveryRoots = new Set<Element>();
 
   async toggle(settings: ExtensionSettings): Promise<StatusResponse> {
     if (this.enabled) {
+      console.info(`${LOG_PREFIX} disable translation`, this.settings ? settingsLogPayload(this.settings) : undefined);
       this.disable();
       return this.status();
     }
 
     this.enabled = true;
     this.settings = settings;
+    console.info(`${LOG_PREFIX} enable translation`, settingsLogPayload(settings));
     this.error = undefined;
     this.runId += 1;
     this.installObservers();
@@ -56,11 +77,27 @@ class TranslationRuntime {
     return this.status();
   }
 
+  updateSettings(settings: ExtensionSettings): StatusResponse {
+    if (this.enabled) {
+      console.info(`${LOG_PREFIX} update settings`, {
+        from: this.settings ? settingsLogPayload(this.settings) : undefined,
+        to: settingsLogPayload(settings)
+      });
+      this.settings = settings;
+      this.processQueueSoon();
+    } else {
+      console.info(`${LOG_PREFIX} settings update received while disabled`, settingsLogPayload(settings));
+    }
+    return this.status();
+  }
+
   status(): StatusResponse {
     return {
       enabled: this.enabled,
       pending: this.queue.length + [...this.records.values()].filter((record) => record.status === "pending" || record.status === "translating").length,
       translated: this.translated,
+      provider: this.settings?.provider,
+      model: this.settings?.model ?? "default",
       error: this.error
     };
   }
@@ -74,6 +111,7 @@ class TranslationRuntime {
     this.error = undefined;
     if (this.processTimer) window.clearTimeout(this.processTimer);
     if (this.discoverTimer) window.clearTimeout(this.discoverTimer);
+    this.pendingDiscoveryRoots.clear();
     this.intersectionObserver?.disconnect();
     this.mutationObserver?.disconnect();
     this.intersectionObserver = undefined;
@@ -107,12 +145,12 @@ class TranslationRuntime {
 
         if (mutation.type === "characterData") {
           const parent = mutation.target.parentElement;
-          if (parent) this.refreshNearestRecord(parent) || roots.add(parent);
+          if (parent && !this.refreshNearestRecord(parent)) roots.add(parent);
           continue;
         }
 
         const targetElement = mutation.target instanceof Element ? mutation.target : mutation.target.parentElement;
-        if (targetElement) this.refreshNearestRecord(targetElement);
+        if (targetElement && !this.refreshNearestRecord(targetElement)) roots.add(targetElement);
 
         for (const node of mutation.addedNodes) {
           if (isTranslationNode(node)) continue;
@@ -129,10 +167,13 @@ class TranslationRuntime {
 
   private discoverSoon(root: Element): void {
     if (!this.enabled) return;
-    if (this.discoverTimer) window.clearTimeout(this.discoverTimer);
+    this.pendingDiscoveryRoots.add(root);
+    if (this.discoverTimer) return;
     this.discoverTimer = window.setTimeout(() => {
       this.discoverTimer = undefined;
-      this.discover(root);
+      const roots = [...this.pendingDiscoveryRoots];
+      this.pendingDiscoveryRoots.clear();
+      for (const pendingRoot of roots) this.discover(pendingRoot);
       this.processQueueSoon();
     }, 80);
   }
@@ -140,6 +181,13 @@ class TranslationRuntime {
   private discover(root: Element | null): void {
     if (!root || !this.enabled) return;
     const candidates = collectCandidateElements(root);
+    if (candidates.length > 0) {
+      logDebug("discovery candidates", {
+        root: describeElement(root),
+        count: candidates.length,
+        candidates: candidates.slice(0, 8).map((element) => describeElement(element))
+      });
+    }
     for (const element of candidates) this.discoverElement(element);
   }
 
@@ -156,12 +204,15 @@ class TranslationRuntime {
       applyTranslation(record, cached);
       record.status = "done";
       this.translated += 1;
+      logDebug("record cache hit", recordLogPayload(record));
       return;
     }
 
     if (isElementNearViewport(record.element)) {
+      logDebug("record queued", recordLogPayload(record));
       this.enqueue(record.id);
     } else {
+      logDebug("record observed", recordLogPayload(record));
       this.intersectionObserver?.observe(record.element);
     }
   }
@@ -174,7 +225,14 @@ class TranslationRuntime {
 
     const text = getSourceText(record.element);
     const hash = hashText(text);
-    if (!isTranslatableText(text) || hash === record.hash) return true;
+    if (hash === record.hash) return true;
+    if (!isTranslatableText(text)) {
+      this.queue = this.queue.filter((queuedId) => queuedId !== record.id);
+      this.intersectionObserver?.unobserve(record.element);
+      restoreRecord(record);
+      this.records.delete(record.id);
+      return true;
+    }
 
     record.text = text;
     record.hash = hash;
@@ -213,14 +271,15 @@ class TranslationRuntime {
 
   private async processQueue(): Promise<void> {
     if (!this.enabled || !this.settings) return;
-    const maxConcurrent = this.settings.provider === "lmstudio" ? 3 : 1;
+    const maxConcurrent = maxConcurrentBatches(this.settings.provider);
+    const batchSize = batchSizeForProvider(this.settings.provider);
     while (this.enabled && this.activeBatches < maxConcurrent && this.queue.length > 0) {
-      const ids = this.queue.splice(0, BATCH_SIZE);
+      const ids = this.queue.splice(0, batchSize);
       const records = ids.map((id) => this.records.get(id)).filter((record): record is SegmentRecord => Boolean(record));
       for (const record of records) record.status = "translating";
       this.activeBatches += 1;
       const batchRunId = this.runId;
-      // Codex CLI 启动开销高，所以按更大的元素批次翻译，避免全屏分成很多小请求。
+      // Ollama 小模型对大 JSON 批次很敏感；OpenAI 保持大批次，本地小模型用小批次提高稳定性。
       void this.translateBatch(records, batchRunId).finally(() => {
         if (this.runId !== batchRunId) return;
         this.activeBatches -= 1;
@@ -230,23 +289,28 @@ class TranslationRuntime {
   }
 
   private async translateBatch(records: SegmentRecord[], batchRunId: number): Promise<void> {
-    if (!this.settings || records.length === 0) return;
+    const settings = this.settings;
+    if (!settings || records.length === 0) return;
     const requestedHashes = new Map(records.map((record) => [record.id, record.hash]));
     const startedAt = performance.now();
-    const modelLabel = this.settings.model ?? "default";
-    console.info("[Translate Bot] request translation", {
-      provider: this.settings.provider,
+    const modelLabel = settings.model ?? "default";
+    console.info(`${LOG_PREFIX} request translation`, {
+      provider: settings.provider,
       model: modelLabel,
       segments: records.length,
+      batchSize: batchSizeForProvider(settings.provider),
+      maxConcurrent: maxConcurrentBatches(settings.provider),
+      ids: records.map((record) => record.id),
+      sample: records.slice(0, 4).map((record) => recordLogPayload(record)),
       url: location.href
     });
     try {
-      const response = await fetch(`${this.settings.proxyUrl}/translate`, {
+      const response = await fetch(`${settings.proxyUrl}/translate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          provider: this.settings.provider,
-          model: this.settings.model,
+          provider: settings.provider,
+          model: settings.model,
           targetLanguage: "zh-CN",
           page: {
             url: location.href,
@@ -270,11 +334,12 @@ class TranslationRuntime {
 
       const payload = (await response.json()) as TranslateProxyResponse;
       if (!this.enabled || this.runId !== batchRunId) return;
-      console.info("[Translate Bot] translation response", {
-        provider: this.settings.provider,
+      console.info(`${LOG_PREFIX} translation response`, {
+        provider: settings.provider,
         model: modelLabel,
         requested: records.length,
         received: payload.segments.length,
+        receivedIds: payload.segments.slice(0, 12).map((segment) => segment.id),
         durationMs: Math.round(performance.now() - startedAt)
       });
       const byId = new Map(payload.segments.map((segment) => [segment.id, segment.translation]));
@@ -293,10 +358,11 @@ class TranslationRuntime {
     } catch (error) {
       if (!this.enabled || this.runId !== batchRunId) return;
       this.error = error instanceof Error ? error.message : "Translation failed.";
-      console.error("[Translate Bot] translation failed", {
-        provider: this.settings.provider,
+      console.error(`${LOG_PREFIX} translation failed`, {
+        provider: settings.provider,
         model: modelLabel,
         segments: records.length,
+        ids: records.map((record) => record.id),
         error: this.error
       });
       for (const record of records) markRecordError(record, this.error);
@@ -307,11 +373,17 @@ class TranslationRuntime {
 export function collectCandidateElements(root: Element): HTMLElement[] {
   const raw: HTMLElement[] = [];
   const maybeRoot = root instanceof HTMLElement ? root : undefined;
-  if (maybeRoot && isCandidateElement(maybeRoot)) raw.push(maybeRoot);
+  if (maybeRoot) {
+    const decision = evaluateCandidateElement(maybeRoot);
+    if (decision.ok) raw.push(maybeRoot);
+    else logMentionSkip(maybeRoot, decision);
+  }
 
-  const elements = root.querySelectorAll<HTMLElement>("p, li, dd, dt, blockquote, figcaption, summary, h1, h2, h3, h4, h5, h6, div");
+  const elements = root.querySelectorAll<HTMLElement>("p, li, dd, dt, blockquote, figcaption, summary, h1, h2, h3, h4, h5, h6, div, article, section, span, a, button");
   for (const element of elements) {
-    if (isCandidateElement(element)) raw.push(element);
+    const decision = evaluateCandidateElement(element);
+    if (decision.ok) raw.push(element);
+    else logMentionSkip(element, decision);
   }
 
   // 保留最深的文本容器，避免把整张卡片和内部段落重复翻译。
@@ -319,22 +391,32 @@ export function collectCandidateElements(root: Element): HTMLElement[] {
 }
 
 export function isCandidateElement(element: HTMLElement): boolean {
-  if (element.hasAttribute(RECORD_ATTR) || element.closest(`[${TRANSLATION_ATTR}]`)) return false;
+  return evaluateCandidateElement(element).ok;
+}
+
+function evaluateCandidateElement(element: HTMLElement): CandidateDecision {
+  if (element.hasAttribute(RECORD_ATTR) || element.closest(`[${TRANSLATION_ATTR}]`)) return { ok: false, reason: "already-translated", text: "" };
   const recordAncestor = element.closest(`[${RECORD_ATTR}]`);
-  if (recordAncestor && recordAncestor !== element) return false;
-  if (shouldSkipElement(element)) return false;
+  if (recordAncestor && recordAncestor !== element) return { ok: false, reason: "inside-record", text: "" };
+  if (shouldSkipElement(element)) return { ok: false, reason: "skip-element", text: getSourceTextForLog(element) };
   const text = getSourceText(element);
-  if (!isTranslatableText(text)) return false;
-  if (BLOCK_TRANSLATION_TAGS.has(element.tagName)) return true;
-  if (element.tagName !== "DIV") return false;
-  if (CONTAINER_TAGS.has(element.tagName)) return false;
-  if (text.length < 25) return false;
-  return ![...element.children].some((child) => STRUCTURAL_CHILD_TAGS.has(child.tagName));
+  if (!isTranslatableText(text)) return { ok: false, reason: "not-translatable", text };
+  if (isUiLabelElement(element, text)) return { ok: true, reason: "ui-label", text };
+  if (element.closest(UI_LABEL_ANCESTOR_SELECTOR)) return { ok: false, reason: "ui-label-ancestor", text };
+  if (BLOCK_TRANSLATION_TAGS.has(element.tagName)) return { ok: true, reason: "block", text };
+  if (!GENERIC_TEXT_CONTAINER_TAGS.has(element.tagName)) return { ok: false, reason: "unsupported-tag", text };
+  if (CONTAINER_TAGS.has(element.tagName) && element.tagName !== "ARTICLE" && element.tagName !== "SECTION") return { ok: false, reason: "structural-container", text };
+  if (element.querySelector(INTERACTIVE_DESCENDANT_SELECTOR)) return { ok: false, reason: "interactive-descendant", text };
+  if (isLikelyTextRoot(element, text)) return { ok: true, reason: "text-root", text };
+  if (text.length < 25) return { ok: false, reason: "short-generic", text };
+  if ([...element.children].some((child) => STRUCTURAL_CHILD_TAGS.has(child.tagName))) return { ok: false, reason: "structural-child", text };
+  return { ok: true, reason: "generic", text };
 }
 
 export function isTranslatableText(text: string): boolean {
   if (!text || text.length < 2) return false;
   if (/^[\d\s.,:;!?()[\]{}'"`~@#$%^&*_+=|/\\-]+$/.test(text)) return false;
+  if (/^([@#][A-Za-z0-9_]+[\s.,:;!?-]*)+$/.test(text)) return false;
   if (!/[A-Za-z0-9\u00C0-\uFFFF]/.test(text)) return false;
   const cjk = (text.match(/[\u3400-\u9FFF]/g) ?? []).length;
   const latin = (text.match(/[A-Za-z]/g) ?? []).length;
@@ -349,7 +431,8 @@ export function createRecord(element: HTMLElement, id: string, text = getSourceT
     text,
     element,
     status: "pending",
-    hash: hashText(text)
+    hash: hashText(text),
+    layout: isUiLabelElement(element, text) ? "inline" : "block"
   };
 }
 
@@ -365,9 +448,17 @@ export function applyTranslation(record: SegmentRecord, translation: string): vo
   translationElement.hidden = false;
   translationElement.removeAttribute("title");
   copyTextStyle(record.element, translationElement);
-  translationElement.style.display = "block";
-  translationElement.style.marginTop = "0.2em";
-  translationElement.style.whiteSpace = "pre-wrap";
+  if (record.layout === "inline") {
+    translationElement.style.display = "inline";
+    translationElement.style.marginLeft = "0.35em";
+    translationElement.style.marginTop = "0";
+    translationElement.style.whiteSpace = "normal";
+  } else {
+    translationElement.style.display = "block";
+    translationElement.style.marginLeft = "";
+    translationElement.style.marginTop = "0.2em";
+    translationElement.style.whiteSpace = "pre-wrap";
+  }
   translationElement.style.overflowWrap = "break-word";
   if (!record.translationElement) record.element.append(translationElement);
   record.translationElement = translationElement;
@@ -379,21 +470,76 @@ function markRecordError(record: SegmentRecord, message: string): void {
   translationElement.textContent = "Translation unavailable";
   translationElement.title = message;
   translationElement.hidden = false;
-  translationElement.style.display = "block";
-  translationElement.style.marginTop = "0.2em";
+  if (record.layout === "inline") {
+    translationElement.style.display = "inline";
+    translationElement.style.marginLeft = "0.35em";
+    translationElement.style.marginTop = "0";
+  } else {
+    translationElement.style.display = "block";
+    translationElement.style.marginTop = "0.2em";
+  }
   if (!record.translationElement) record.element.append(translationElement);
   record.translationElement = translationElement;
   record.status = "error";
 }
 
+function batchSizeForProvider(provider: ExtensionSettings["provider"]): number {
+  if (provider === "ollama") return OLLAMA_BATCH_SIZE;
+  if (provider === "lmstudio") return LMSTUDIO_BATCH_SIZE;
+  return OPENAI_BATCH_SIZE;
+}
+
+function maxConcurrentBatches(provider: ExtensionSettings["provider"]): number {
+  if (provider === "openai") return 1;
+  if (provider === "ollama") return 1;
+  return 3;
+}
+
 function shouldSkipElement(element: Element): boolean {
-  if (SKIP_TAGS.has(element.tagName)) return true;
+  if (SKIP_TAGS.has(element.tagName) && !isPotentialUiLabelElement(element)) return true;
+  const skippedAncestor = element.closest(SKIP_ANCESTOR_SELECTOR);
+  if (skippedAncestor && skippedAncestor !== element) return true;
   if (element.closest(`[${TRANSLATION_ATTR}]`)) return true;
   if (element.closest("[aria-hidden='true'], [hidden]")) return true;
   const htmlElement = element as HTMLElement;
   if (isEditable(htmlElement)) return true;
   const style = window.getComputedStyle(htmlElement);
   return style.display === "none" || style.visibility === "hidden";
+}
+
+function isPotentialUiLabelElement(element: Element): boolean {
+  return UI_LABEL_TAGS.has(element.tagName) && Boolean(element.closest(UI_LABEL_ANCESTOR_SELECTOR));
+}
+
+function isUiLabelElement(element: HTMLElement, text = getSourceText(element)): boolean {
+  if (!isPotentialUiLabelElement(element)) return false;
+  if (text.length < 2 || text.length > 40) return false;
+  if (/^[@#]/.test(text)) return false;
+  if (!/[A-Za-z]/.test(text)) return false;
+  if (text.split(/\s+/).filter(Boolean).length > 4) return false;
+  if (element.children.length > 0) return false;
+  return true;
+}
+
+function isLikelyTextRoot(element: HTMLElement, text: string): boolean {
+  // X 的推文正文通常标记为 data-testid="tweetText"；优先把它作为整段处理，避免只看到 @handle。
+  if (element.dataset.testid === "tweetText") return true;
+  const hasTextDirection = element.getAttribute("dir") === "auto" || element.hasAttribute("lang");
+  // 其他站点没有 testid 时，只放行“有语言/方向标记 + @mention + 真实英文词”的纯内联正文容器。
+  if (hasTextDirection && hasMention(text) && hasEnoughWordsAroundMention(text) && hasOnlyInlineTextDescendants(element)) return true;
+  return false;
+}
+
+function hasOnlyInlineTextDescendants(element: Element): boolean {
+  return [...element.children].every((child) => INLINE_TEXT_CHILD_TAGS.has(child.tagName) && hasOnlyInlineTextDescendants(child));
+}
+
+function hasMention(text: string): boolean {
+  return MENTION_RE.test(text);
+}
+
+function hasEnoughWordsAroundMention(text: string): boolean {
+  return text.replace(MENTION_RE, " ").split(/\s+/).filter((word) => /[A-Za-z]/.test(word)).length >= 2;
 }
 
 function isEditable(element: Element): boolean {
@@ -405,11 +551,47 @@ function isEditable(element: Element): boolean {
 function getSourceText(element: Element): string {
   const clone = element.cloneNode(true) as Element;
   clone.querySelectorAll(`[${TRANSLATION_ATTR}]`).forEach((node) => node.remove());
-  return normalizeText(clone.textContent ?? "");
+  return normalizeSourceText(extractStructuredText(clone));
 }
 
-function normalizeText(text: string): string {
+function getSourceTextForLog(element: Element): string {
+  try {
+    return getSourceText(element);
+  } catch {
+    return normalizeInlineText(element.textContent ?? "");
+  }
+}
+
+function normalizeInlineText(text: string): string {
   return text.replace(/\s+/g, " ").trim();
+}
+
+function normalizeSourceText(text: string): string {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .replace(/\u00a0/g, " ")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+/g, " ").trim())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function extractStructuredText(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? "";
+  if (!(node instanceof Element)) return "";
+  if (node.matches(`[${TRANSLATION_ATTR}], script, style, noscript, svg, canvas`)) return "";
+  if (node.tagName === "BR") return "\n";
+
+  const childText = [...node.childNodes].map(extractStructuredText).join("");
+  if (!childText) return "";
+  if (node.tagName === "LI") return `\n- ${childText}\n`;
+  if (isLineBreakElement(node)) return `\n${childText}\n`;
+  return childText;
+}
+
+function isLineBreakElement(element: Element): boolean {
+  return BLOCK_TRANSLATION_TAGS.has(element.tagName) || ["DIV", "ARTICLE", "SECTION"].includes(element.tagName);
 }
 
 function copyTextStyle(source: Element, target: HTMLElement): void {
@@ -431,8 +613,60 @@ function isElementNearViewport(element: Element): boolean {
 
 function getSiblingText(element: Element, key: "previousElementSibling" | "nextElementSibling"): string {
   const sibling = element[key];
-  const text = sibling?.textContent?.replace(/\s+/g, " ").trim() ?? "";
+  const text = sibling ? normalizeInlineText(sibling.textContent ?? "") : "";
   return text.slice(0, 240);
+}
+
+function logMentionSkip(element: HTMLElement, decision: CandidateDecision): void {
+  if (!decision.text || !hasMention(decision.text)) return;
+  // 只对 @mention 相关跳过打调试日志，避免普通页面扫描产生过多噪音。
+  logDebug("mention candidate skipped", {
+    reason: decision.reason,
+    element: describeElement(element),
+    text: previewText(decision.text)
+  });
+}
+
+function logDebug(message: string, payload: unknown): void {
+  console.debug(`${LOG_PREFIX} ${message}`, payload);
+}
+
+function recordLogPayload(record: SegmentRecord): Record<string, unknown> {
+  return {
+    id: record.id,
+    layout: record.layout,
+    status: record.status,
+    element: describeElement(record.element),
+    hasMention: hasMention(record.text),
+    text: previewText(record.text)
+  };
+}
+
+function settingsLogPayload(settings: ExtensionSettings): Record<string, string> {
+  return {
+    provider: settings.provider,
+    model: settings.model ?? "default",
+    proxyUrl: settings.proxyUrl
+  };
+}
+
+function describeElement(element: Element): string {
+  const parts = [element.tagName.toLowerCase()];
+  if (element.id) parts.push(`#${element.id}`);
+  const testId = (element as HTMLElement).dataset?.testid;
+  if (testId) parts.push(`[data-testid="${testId}"]`);
+  const role = element.getAttribute("role");
+  if (role) parts.push(`[role="${role}"]`);
+  const lang = element.getAttribute("lang");
+  if (lang) parts.push(`[lang="${lang}"]`);
+  const dir = element.getAttribute("dir");
+  if (dir) parts.push(`[dir="${dir}"]`);
+  return parts.join("");
+}
+
+function previewText(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  return normalized.length > 180 ? `${normalized.slice(0, 177)}...` : normalized;
 }
 
 function isTranslationNode(node: Node): boolean {
@@ -459,6 +693,10 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
     if (message.type === "TRANSLATE_TOGGLE") {
       void runtime.toggle(message.settings).then(sendResponse);
       return true;
+    }
+    if (message.type === "TRANSLATE_UPDATE_SETTINGS") {
+      sendResponse(runtime.updateSettings(message.settings));
+      return false;
     }
     if (message.type === "TRANSLATE_STATUS") {
       sendResponse(runtime.status());

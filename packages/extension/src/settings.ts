@@ -1,4 +1,4 @@
-export type Provider = "openai" | "lmstudio";
+export type Provider = "openai" | "lmstudio" | "ollama";
 
 export interface ExtensionSettings {
   provider: Provider;
@@ -7,7 +7,7 @@ export interface ExtensionSettings {
 }
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
-  provider: "openai",
+  provider: "ollama",
   proxyUrl: "http://127.0.0.1:8787"
 };
 
@@ -21,7 +21,7 @@ export async function saveSettings(settings: ExtensionSettings): Promise<void> {
 }
 
 function normalizeSettings(raw: Partial<ExtensionSettings>): ExtensionSettings {
-  const provider = raw.provider === "lmstudio" ? "lmstudio" : "openai";
+  const provider = raw.provider === "openai" || raw.provider === "lmstudio" || raw.provider === "ollama" ? raw.provider : DEFAULT_SETTINGS.provider;
   const rawModel = typeof raw.model === "string" ? raw.model.trim() : "";
   const model = rawModel && rawModel !== "default" ? rawModel : undefined;
   const proxyUrl = typeof raw.proxyUrl === "string" && raw.proxyUrl.trim() ? raw.proxyUrl.trim().replace(/\/$/, "") : DEFAULT_SETTINGS.proxyUrl;

@@ -12,7 +12,8 @@ export function buildTranslationPrompt(request: TranslateRequest): string {
   return [
     "You are translating webpage text into natural Simplified Chinese.",
     "Use the page title, URL, and neighboring text as context. Do not translate isolated snippets mechanically.",
-    "Preserve numbers, code, URLs, product names, markup-like tokens, and whitespace intent where possible.",
+    "Preserve numbers, code, URLs, product names, emphasis markers, list markers, paragraph breaks, and line breaks.",
+    "If the source text contains bullets, blank lines, or short emphasized lines, keep the same readable structure in the translation.",
     "Return only valid JSON with this exact shape: {\"segments\":[{\"id\":\"...\",\"translation\":\"...\"}]}",
     "",
     `Page title: ${request.page.title}`,

@@ -17,6 +17,11 @@ chrome.runtime.onMessage.addListener((message: BackgroundMessage, _sender, sendR
     return true;
   }
 
+  if (message.type === "UPDATE_TRANSLATION_SETTINGS") {
+    void updateCurrentTabSettings(message.settings).then(sendResponse);
+    return true;
+  }
+
   if (message.type === "GET_TAB_STATUS") {
     void getActiveTab().then((tab) => (tab?.id ? sendTabMessage<StatusResponse>(tab.id, { type: "TRANSLATE_STATUS" }) : undefined)).then(sendResponse);
     return true;
@@ -32,9 +37,27 @@ async function toggleCurrentTab(overrideSettings?: Awaited<ReturnType<typeof get
   }
 
   const settings = overrideSettings ?? (await getSettings());
+  console.info("[Translate Bot] background toggle", settingsLogPayload(settings));
   await ensureContentScript(tab.id);
   await sendTabMessage(tab.id, { type: "TRANSLATE_TOGGLE", settings });
   return { ok: true };
+}
+
+async function updateCurrentTabSettings(settings: Awaited<ReturnType<typeof getSettings>>): Promise<{ ok: boolean; error?: string; status?: StatusResponse }> {
+  const tab = await getActiveTab();
+  if (!tab?.id || !tab.url || !isSupportedUrl(tab.url)) {
+    return { ok: true };
+  }
+
+  try {
+    console.info("[Translate Bot] background update settings", settingsLogPayload(settings));
+    const status = await sendTabMessage<StatusResponse>(tab.id, { type: "TRANSLATE_UPDATE_SETTINGS", settings });
+    console.info("[Translate Bot] background update status", status);
+    return { ok: true, status };
+  } catch {
+    // 当前页面可能还没有注入 content script；设置仍已保存，等下一次开启时会读取新值。
+    return { ok: true };
+  }
 }
 
 async function getActiveTab(): Promise<chrome.tabs.Tab | undefined> {
@@ -59,4 +82,12 @@ function sendTabMessage<T>(tabId: number, message: unknown): Promise<T> {
 
 function isSupportedUrl(url: string): boolean {
   return url.startsWith("http://") || url.startsWith("https://");
+}
+
+function settingsLogPayload(settings: Awaited<ReturnType<typeof getSettings>>): Record<string, string> {
+  return {
+    provider: settings.provider,
+    model: settings.model ?? "default",
+    proxyUrl: settings.proxyUrl
+  };
 }
