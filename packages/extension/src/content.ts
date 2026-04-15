@@ -20,6 +20,21 @@ const LMSTUDIO_BATCH_SIZE = 40;
 const OLLAMA_BATCH_SIZE = 8;
 const NEAR_VIEWPORT_MARGIN = 900;
 const LOG_PREFIX = "[Translate Bot]";
+const CACHE_STORAGE_KEY = "translateBot.translationCache.v1";
+const CACHE_VERSION = 1;
+const CACHE_MAX_ENTRIES = 2000;
+const CACHE_MAX_TEXT_LENGTH = 3000;
+
+interface StoredTranslationCacheEntry {
+  translation: string;
+  createdAt: number;
+  lastUsed: number;
+}
+
+interface StoredTranslationCache {
+  version: number;
+  entries: Record<string, StoredTranslationCacheEntry>;
+}
 
 export interface SegmentRecord {
   id: string;
@@ -46,6 +61,7 @@ export class TranslationRuntime {
   private settings?: ExtensionSettings;
   private readonly records = new Map<string, SegmentRecord>();
   private readonly cache = new Map<string, string>();
+  private readonly persistentCacheMeta = new Map<string, StoredTranslationCacheEntry>();
   private queue: string[] = [];
   private translated = 0;
   private activeBatches = 0;
@@ -57,6 +73,7 @@ export class TranslationRuntime {
   private mutationObserver?: MutationObserver;
   private processTimer?: number;
   private discoverTimer?: number;
+  private persistTimer?: number;
   private readonly pendingDiscoveryRoots = new Set<Element>();
 
   async toggle(settings: ExtensionSettings): Promise<StatusResponse> {
@@ -71,6 +88,8 @@ export class TranslationRuntime {
     console.info(`${LOG_PREFIX} enable translation`, settingsLogPayload(settings));
     this.error = undefined;
     this.runId += 1;
+    await this.loadPersistentCache();
+    if (!this.enabled) return this.status();
     this.installObservers();
     this.discover(document.body);
     this.processQueueSoon();
@@ -111,6 +130,11 @@ export class TranslationRuntime {
     this.error = undefined;
     if (this.processTimer) window.clearTimeout(this.processTimer);
     if (this.discoverTimer) window.clearTimeout(this.discoverTimer);
+    if (this.persistTimer) {
+      window.clearTimeout(this.persistTimer);
+      this.persistTimer = undefined;
+      void this.flushPersistentCache();
+    }
     this.pendingDiscoveryRoots.clear();
     this.intersectionObserver?.disconnect();
     this.mutationObserver?.disconnect();
@@ -204,6 +228,7 @@ export class TranslationRuntime {
       applyTranslation(record, cached);
       record.status = "done";
       this.translated += 1;
+      this.touchCache(record.hash);
       logDebug("record cache hit", recordLogPayload(record));
       return;
     }
@@ -224,7 +249,7 @@ export class TranslationRuntime {
     if (!record) return false;
 
     const text = getSourceText(record.element);
-    const hash = hashText(text);
+    const hash = cacheKeyForText(text);
     if (hash === record.hash) return true;
     if (!isTranslatableText(text)) {
       this.queue = this.queue.filter((queuedId) => queuedId !== record.id);
@@ -246,6 +271,7 @@ export class TranslationRuntime {
       applyTranslation(record, cached);
       record.status = "done";
       this.translated += 1;
+      this.touchCache(hash);
       return true;
     }
 
@@ -352,7 +378,7 @@ export class TranslationRuntime {
         }
         applyTranslation(record, translation);
         record.status = "done";
-        this.cache.set(record.hash, translation);
+        this.rememberTranslation(record.hash, record.text, translation);
         this.translated += 1;
       }
     } catch (error) {
@@ -366,6 +392,79 @@ export class TranslationRuntime {
         error: this.error
       });
       for (const record of records) markRecordError(record, this.error);
+    }
+  }
+
+  private async loadPersistentCache(): Promise<void> {
+    if (!hasChromeLocalStorage()) return;
+    try {
+      const stored = await chrome.storage.local.get(CACHE_STORAGE_KEY);
+      const cache = parseStoredCache(stored[CACHE_STORAGE_KEY]);
+      if (!cache) return;
+      let loaded = 0;
+      for (const [key, entry] of Object.entries(cache.entries)) {
+        if (!isStoredCacheEntry(entry)) continue;
+        this.cache.set(key, entry.translation);
+        this.persistentCacheMeta.set(key, entry);
+        loaded += 1;
+      }
+      if (loaded > 0) logDebug("persistent cache loaded", { entries: loaded });
+    } catch (error) {
+      console.warn(`${LOG_PREFIX} persistent cache load failed`, formatError(error));
+    }
+  }
+
+  private rememberTranslation(key: string, text: string, translation: string): void {
+    this.cache.set(key, translation);
+    if (!isPersistentCacheableText(text)) return;
+    const now = Date.now();
+    this.persistentCacheMeta.set(key, {
+      translation,
+      createdAt: this.persistentCacheMeta.get(key)?.createdAt ?? now,
+      lastUsed: now
+    });
+    this.trimPersistentCache();
+    this.schedulePersistentCacheFlush();
+  }
+
+  private touchCache(key: string): void {
+    const meta = this.persistentCacheMeta.get(key);
+    if (!meta) return;
+    meta.lastUsed = Date.now();
+    this.schedulePersistentCacheFlush();
+  }
+
+  private schedulePersistentCacheFlush(): void {
+    if (!hasChromeLocalStorage() || this.persistTimer) return;
+    // 命中缓存时只做延迟合并写入，避免滚动页面时频繁写 chrome.storage。
+    this.persistTimer = window.setTimeout(() => {
+      this.persistTimer = undefined;
+      void this.flushPersistentCache();
+    }, 800);
+  }
+
+  private async flushPersistentCache(): Promise<void> {
+    if (!hasChromeLocalStorage()) return;
+    try {
+      this.trimPersistentCache();
+      const entries = Object.fromEntries(this.persistentCacheMeta.entries());
+      await chrome.storage.local.set({
+        [CACHE_STORAGE_KEY]: {
+          version: CACHE_VERSION,
+          entries
+        } satisfies StoredTranslationCache
+      });
+      logDebug("persistent cache saved", { entries: this.persistentCacheMeta.size });
+    } catch (error) {
+      console.warn(`${LOG_PREFIX} persistent cache save failed`, formatError(error));
+    }
+  }
+
+  private trimPersistentCache(): void {
+    if (this.persistentCacheMeta.size <= CACHE_MAX_ENTRIES) return;
+    const sorted = [...this.persistentCacheMeta.entries()].sort(([, left], [, right]) => left.lastUsed - right.lastUsed);
+    for (const [key] of sorted.slice(0, this.persistentCacheMeta.size - CACHE_MAX_ENTRIES)) {
+      this.persistentCacheMeta.delete(key);
     }
   }
 }
@@ -431,7 +530,7 @@ export function createRecord(element: HTMLElement, id: string, text = getSourceT
     text,
     element,
     status: "pending",
-    hash: hashText(text),
+    hash: cacheKeyForText(text),
     layout: isUiLabelElement(element, text) ? "inline" : "block"
   };
 }
@@ -684,6 +783,35 @@ function hashText(text: string): string {
     hash = ((hash << 5) + hash) ^ text.charCodeAt(index);
   }
   return String(hash >>> 0);
+}
+
+function cacheKeyForText(text: string): string {
+  return `zh-CN:${text.length}:${hashText(text)}`;
+}
+
+function isPersistentCacheableText(text: string): boolean {
+  return text.length <= CACHE_MAX_TEXT_LENGTH;
+}
+
+function hasChromeLocalStorage(): boolean {
+  return typeof chrome !== "undefined" && Boolean(chrome.storage?.local);
+}
+
+function parseStoredCache(value: unknown): StoredTranslationCache | null {
+  if (!value || typeof value !== "object") return null;
+  const cache = value as Partial<StoredTranslationCache>;
+  if (cache.version !== CACHE_VERSION || !cache.entries || typeof cache.entries !== "object") return null;
+  return cache as StoredTranslationCache;
+}
+
+function isStoredCacheEntry(value: unknown): value is StoredTranslationCacheEntry {
+  if (!value || typeof value !== "object") return false;
+  const entry = value as Partial<StoredTranslationCacheEntry>;
+  return typeof entry.translation === "string" && typeof entry.createdAt === "number" && typeof entry.lastUsed === "number";
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 const runtime = new TranslationRuntime();

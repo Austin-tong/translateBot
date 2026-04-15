@@ -260,6 +260,39 @@ describe("content translation runtime", () => {
     await settleRuntime();
   });
 
+  it("recalls repeated text from persistent storage before calling the model", async () => {
+    const localStore: Record<string, unknown> = {};
+    vi.stubGlobal("chrome", {
+      storage: {
+        local: {
+          get: vi.fn(async (key: string) => ({ [key]: localStore[key] })),
+          set: vi.fn(async (items: Record<string, unknown>) => {
+            Object.assign(localStore, items);
+          })
+        }
+      }
+    });
+    const fetchMock = mockTranslationFetch();
+    const firstRuntime = new TranslationRuntime();
+    document.body.innerHTML = `<p id="copy">Repeated paragraph has enough English words for translation caching.</p>`;
+
+    await firstRuntime.toggle({ provider: "ollama", proxyUrl: "http://proxy.test" });
+    await settleRuntime(1000);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("[data-translate-bot-translation]")?.textContent).toContain("translated:");
+
+    firstRuntime.disable();
+    document.body.innerHTML = `<p id="copy">Repeated paragraph has enough English words for translation caching.</p>`;
+    const secondRuntime = new TranslationRuntime();
+
+    await secondRuntime.toggle({ provider: "ollama", proxyUrl: "http://proxy.test" });
+    await settleRuntime(1000);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("[data-translate-bot-translation]")?.textContent).toContain("translated:");
+  });
+
   it("requeues changed text and prevents stale translations from overwriting the new hash", async () => {
     const firstFetch = deferred<Response>();
     const secondFetch = deferred<Response>();
