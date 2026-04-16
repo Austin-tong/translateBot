@@ -1,4 +1,4 @@
-import type { BackgroundMessage, StatusResponse } from "./messages.js";
+import type { BackgroundMessage, StatusResponse, ToggleResponse } from "./messages.js";
 import { getSettings } from "./settings.js";
 
 chrome.commands.onCommand.addListener((command) => {
@@ -13,7 +13,9 @@ chrome.action.onClicked.addListener(() => {
 
 chrome.runtime.onMessage.addListener((message: BackgroundMessage, _sender, sendResponse) => {
   if (message.type === "TOGGLE_TRANSLATION") {
-    void toggleCurrentTab(message.settings).then(sendResponse);
+    void toggleCurrentTab(message.settings).then(sendResponse, (error: unknown) => {
+      sendResponse({ ok: false, error: formatError(error) } satisfies ToggleResponse);
+    });
     return true;
   }
 
@@ -23,14 +25,14 @@ chrome.runtime.onMessage.addListener((message: BackgroundMessage, _sender, sendR
   }
 
   if (message.type === "GET_TAB_STATUS") {
-    void getActiveTab().then((tab) => (tab?.id ? sendTabMessage<StatusResponse>(tab.id, { type: "TRANSLATE_STATUS" }) : undefined)).then(sendResponse);
+    void getCurrentTabStatus().then(sendResponse);
     return true;
   }
 
   return false;
 });
 
-async function toggleCurrentTab(overrideSettings?: Awaited<ReturnType<typeof getSettings>>): Promise<{ ok: boolean; error?: string }> {
+async function toggleCurrentTab(overrideSettings?: Awaited<ReturnType<typeof getSettings>>): Promise<ToggleResponse> {
   const tab = await getActiveTab();
   if (!tab?.id || !tab.url || !isSupportedUrl(tab.url)) {
     return { ok: false, error: "This page cannot be translated. Try a normal http or https page." };
@@ -39,8 +41,8 @@ async function toggleCurrentTab(overrideSettings?: Awaited<ReturnType<typeof get
   const settings = overrideSettings ?? (await getSettings());
   console.info("[Translate Bot] background toggle", settingsLogPayload(settings));
   await ensureContentScript(tab.id);
-  await sendTabMessage(tab.id, { type: "TRANSLATE_TOGGLE", settings });
-  return { ok: true };
+  const status = await sendTabMessage<StatusResponse>(tab.id, { type: "TRANSLATE_TOGGLE", settings });
+  return { ok: true, status };
 }
 
 async function updateCurrentTabSettings(settings: Awaited<ReturnType<typeof getSettings>>): Promise<{ ok: boolean; error?: string; status?: StatusResponse }> {
@@ -63,6 +65,17 @@ async function updateCurrentTabSettings(settings: Awaited<ReturnType<typeof getS
 async function getActiveTab(): Promise<chrome.tabs.Tab | undefined> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab;
+}
+
+async function getCurrentTabStatus(): Promise<StatusResponse | undefined> {
+  const tab = await getActiveTab();
+  if (!tab?.id || !tab.url || !isSupportedUrl(tab.url)) return undefined;
+
+  try {
+    return await sendTabMessage<StatusResponse>(tab.id, { type: "TRANSLATE_STATUS" });
+  } catch {
+    return undefined;
+  }
 }
 
 async function ensureContentScript(tabId: number): Promise<void> {
@@ -90,4 +103,8 @@ function settingsLogPayload(settings: Awaited<ReturnType<typeof getSettings>>): 
     model: settings.model ?? "default",
     proxyUrl: settings.proxyUrl
   };
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

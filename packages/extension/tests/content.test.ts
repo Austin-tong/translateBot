@@ -80,6 +80,22 @@ describe("content translation DOM helpers", () => {
     expect(translation.style.marginLeft).toBe("0.35em");
   });
 
+  it("adds a retry button when a translated record can refresh", () => {
+    document.body.innerHTML = `<p id="copy">A fast brown fox jumps over the lazy dog.</p>`;
+    const paragraph = document.querySelector("#copy") as HTMLParagraphElement;
+    const record = createRecord(paragraph, "seg-retry");
+    const refresh = vi.fn();
+    record.onRefresh = refresh;
+
+    applyTranslation(record, "一只敏捷的棕色狐狸跳过懒狗。");
+    paragraph.querySelector<HTMLButtonElement>("[data-translate-bot-refresh]")?.click();
+
+    expect(paragraph.querySelector("[data-translate-bot-translation]")?.textContent).toContain("一只敏捷的棕色狐狸跳过懒狗。");
+    expect(paragraph.querySelector("[data-translate-bot-refresh]")?.textContent).toBe("");
+    expect(paragraph.querySelector("[data-translate-bot-refresh-icon]")).not.toBeNull();
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
   it("does not translate profile cards as one mixed container when a button is present", () => {
     document.body.innerHTML = `
       <article id="profile">
@@ -316,14 +332,66 @@ describe("content translation runtime", () => {
 
     firstFetch.resolve(translationResponse((bodies[0] as ProxyRequest).segments, "OLD"));
     await settleRuntime();
-    expect(copy.querySelector("[data-translate-bot-translation]")).toBeNull();
+    expect(copy.querySelector("[data-translate-bot-state='loading']")?.textContent).toBe("");
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
     secondFetch.resolve(translationResponse((bodies[1] as ProxyRequest).segments, "NEW"));
     await settleRuntime();
 
-    expect(copy.querySelector("[data-translate-bot-translation]")?.textContent).toBe("NEW");
+    expect(copy.querySelector("[data-translate-bot-translation]")?.textContent).toContain("NEW");
     expect((bodies[1] as ProxyRequest).segments[0]?.text).toBe("Updated English paragraph has enough words to translate.");
+  });
+
+  it("shows loading while a block is translating", async () => {
+    const pendingFetch = deferred<Response>();
+    const bodies: unknown[] = [];
+    const fetchMock = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return pendingFetch.promise;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new TranslationRuntime();
+    document.body.innerHTML = `<p id="copy">Loading paragraph has enough English words for translation.</p>`;
+
+    await runtime.toggle({ provider: "openai", proxyUrl: "http://proxy.test" });
+    await settleRuntime(40);
+
+    const loading = document.querySelector("[data-translate-bot-state='loading']");
+    expect(loading?.textContent).toBe("");
+    expect(loading?.getAttribute("aria-label")).toBe("Translating");
+    expect(loading?.querySelector("[data-translate-bot-loading-spinner]")).not.toBeNull();
+
+    pendingFetch.resolve(translationResponse((bodies[0] as ProxyRequest).segments, "DONE"));
+    await settleRuntime();
+  });
+
+  it("retranslates a completed block from its retry button", async () => {
+    const firstFetch = deferred<Response>();
+    const secondFetch = deferred<Response>();
+    const bodies: unknown[] = [];
+    const fetchMock = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return bodies.length === 1 ? firstFetch.promise : secondFetch.promise;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new TranslationRuntime();
+    document.body.innerHTML = `<p id="copy">Retry paragraph has enough English words for translation.</p>`;
+
+    await runtime.toggle({ provider: "openai", proxyUrl: "http://proxy.test" });
+    await settleRuntime(40);
+    firstFetch.resolve(translationResponse((bodies[0] as ProxyRequest).segments, "FIRST"));
+    await settleRuntime();
+
+    document.querySelector<HTMLButtonElement>("[data-translate-bot-refresh]")?.click();
+    await settleRuntime(40);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(document.querySelector("[data-translate-bot-state='loading']")?.textContent).toBe("");
+
+    secondFetch.resolve(translationResponse((bodies[1] as ProxyRequest).segments, "SECOND"));
+    await settleRuntime();
+
+    expect(document.querySelector("[data-translate-bot-translation]")?.textContent).toContain("SECOND");
   });
 });
 

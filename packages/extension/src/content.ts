@@ -3,6 +3,8 @@ import type { ExtensionSettings } from "./settings.js";
 
 const RECORD_ATTR = "data-translate-bot-id";
 const TRANSLATION_ATTR = "data-translate-bot-translation";
+const TRANSLATION_STATE_ATTR = "data-translate-bot-state";
+const TRANSLATION_UI_STYLE_ID = "translate-bot-ui-style";
 const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "SVG", "CANVAS", "INPUT", "TEXTAREA", "SELECT", "PRE", "CODE", "BUTTON"]);
 const SKIP_ANCESTOR_SELECTOR = "form";
 const UI_LABEL_ANCESTOR_SELECTOR = "button, nav, [role='button'], [role='navigation'], [role='menuitem'], [role='tab']";
@@ -24,6 +26,12 @@ const CACHE_STORAGE_KEY = "translateBot.translationCache.v1";
 const CACHE_VERSION = 1;
 const CACHE_MAX_ENTRIES = 2000;
 const CACHE_MAX_TEXT_LENGTH = 3000;
+const SVG_NS = "http://www.w3.org/2000/svg";
+// Bootstrap Icons arrow-clockwise, MIT: https://icons.getbootstrap.com/icons/arrow-clockwise/
+const REFRESH_ICON_PATHS = [
+  "M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2z",
+  "M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466"
+];
 
 interface StoredTranslationCacheEntry {
   translation: string;
@@ -44,6 +52,7 @@ export interface SegmentRecord {
   status: "pending" | "queued" | "translating" | "done" | "error";
   hash: string;
   layout: "block" | "inline";
+  onRefresh?: () => void;
 }
 
 interface TranslateProxyResponse {
@@ -221,6 +230,9 @@ export class TranslationRuntime {
     if (!isTranslatableText(text)) return;
 
     const record = createRecord(element, `tb-${++this.sequence}`, text);
+    record.onRefresh = () => {
+      this.refreshRecord(record.id);
+    };
     this.records.set(record.id, record);
 
     const cached = this.cache.get(record.hash);
@@ -284,7 +296,31 @@ export class TranslationRuntime {
     const record = this.records.get(id);
     if (!record || record.status !== "pending" || this.queue.includes(id)) return;
     record.status = "queued";
+    applyLoading(record);
     this.queue.push(id);
+  }
+
+  private refreshRecord(id: string): void {
+    if (!this.enabled) return;
+    const record = this.records.get(id);
+    if (!record || record.status === "queued" || record.status === "translating") return;
+
+    const text = getSourceText(record.element);
+    if (!isTranslatableText(text)) {
+      this.queue = this.queue.filter((queuedId) => queuedId !== record.id);
+      this.intersectionObserver?.unobserve(record.element);
+      restoreRecord(record);
+      this.records.delete(record.id);
+      return;
+    }
+
+    record.text = text;
+    record.hash = cacheKeyForText(text);
+    record.status = "pending";
+    this.queue = this.queue.filter((queuedId) => queuedId !== record.id);
+    this.intersectionObserver?.unobserve(record.element);
+    this.enqueue(record.id);
+    this.processQueueSoon();
   }
 
   private processQueueSoon(): void {
@@ -541,11 +577,42 @@ export function restoreRecord(record: SegmentRecord): void {
 }
 
 export function applyTranslation(record: SegmentRecord, translation: string): void {
+  const translationElement = prepareTranslationElement(record);
+  translationElement.setAttribute(TRANSLATION_STATE_ATTR, "done");
+  translationElement.removeAttribute("aria-label");
+  translationElement.removeAttribute("title");
+  const nodes: Node[] = [document.createTextNode(translation)];
+  const refreshButton = createRefreshButton(record);
+  if (refreshButton) nodes.push(document.createTextNode(" "), refreshButton);
+  translationElement.replaceChildren(...nodes);
+}
+
+export function applyLoading(record: SegmentRecord): void {
+  const translationElement = prepareTranslationElement(record);
+  translationElement.setAttribute(TRANSLATION_STATE_ATTR, "loading");
+  translationElement.setAttribute("aria-label", "Translating");
+  translationElement.removeAttribute("title");
+  const spinner = createRefreshIcon();
+  spinner.setAttribute("data-translate-bot-loading-spinner", "true");
+  spinner.setAttribute("aria-hidden", "true");
+  translationElement.replaceChildren(spinner);
+}
+
+function markRecordError(record: SegmentRecord, message: string): void {
+  const translationElement = prepareTranslationElement(record);
+  translationElement.setAttribute(TRANSLATION_STATE_ATTR, "error");
+  translationElement.removeAttribute("aria-label");
+  translationElement.replaceChildren(document.createTextNode("Translation unavailable"));
+  translationElement.title = message;
+  record.status = "error";
+}
+
+function prepareTranslationElement(record: SegmentRecord): HTMLSpanElement {
+  ensureTranslationUiStyle();
   const translationElement = record.translationElement ?? document.createElement("span");
   translationElement.setAttribute(TRANSLATION_ATTR, "true");
-  translationElement.textContent = translation;
+  if (record.status !== "queued" && record.status !== "translating") translationElement.removeAttribute("aria-label");
   translationElement.hidden = false;
-  translationElement.removeAttribute("title");
   copyTextStyle(record.element, translationElement);
   if (record.layout === "inline") {
     translationElement.style.display = "inline";
@@ -561,25 +628,91 @@ export function applyTranslation(record: SegmentRecord, translation: string): vo
   translationElement.style.overflowWrap = "break-word";
   if (!record.translationElement) record.element.append(translationElement);
   record.translationElement = translationElement;
+  return translationElement;
 }
 
-function markRecordError(record: SegmentRecord, message: string): void {
-  const translationElement = record.translationElement ?? document.createElement("span");
-  translationElement.setAttribute(TRANSLATION_ATTR, "true");
-  translationElement.textContent = "Translation unavailable";
-  translationElement.title = message;
-  translationElement.hidden = false;
-  if (record.layout === "inline") {
-    translationElement.style.display = "inline";
-    translationElement.style.marginLeft = "0.35em";
-    translationElement.style.marginTop = "0";
-  } else {
-    translationElement.style.display = "block";
-    translationElement.style.marginTop = "0.2em";
+function createRefreshButton(record: SegmentRecord): HTMLButtonElement | undefined {
+  if (!record.onRefresh) return undefined;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.title = "Retranslate this block";
+  button.ariaLabel = "Retranslate this block";
+  button.setAttribute("data-translate-bot-refresh", "true");
+  button.append(createRefreshIcon());
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    record.onRefresh?.();
+  });
+  return button;
+}
+
+function createRefreshIcon(): SVGSVGElement {
+  const icon = document.createElementNS(SVG_NS, "svg");
+  icon.setAttribute("data-translate-bot-refresh-icon", "true");
+  icon.setAttribute("aria-hidden", "true");
+  icon.setAttribute("viewBox", "0 0 16 16");
+  icon.setAttribute("fill", "currentColor");
+  icon.setAttribute("focusable", "false");
+  for (const pathData of REFRESH_ICON_PATHS) {
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", pathData);
+    icon.append(path);
   }
-  if (!record.translationElement) record.element.append(translationElement);
-  record.translationElement = translationElement;
-  record.status = "error";
+  icon.firstElementChild?.setAttribute("fill-rule", "evenodd");
+  return icon;
+}
+
+function ensureTranslationUiStyle(): void {
+  if (document.getElementById(TRANSLATION_UI_STYLE_ID)) return;
+  const style = document.createElement("style");
+  style.id = TRANSLATION_UI_STYLE_ID;
+  style.textContent = `
+@keyframes translate-bot-spin {
+  to { transform: rotate(360deg); }
+}
+[${TRANSLATION_ATTR}] [data-translate-bot-loading-spinner="true"] {
+  display: inline-block;
+  width: 0.95em;
+  height: 0.95em;
+  vertical-align: -0.1em;
+  animation: translate-bot-spin 0.8s linear infinite;
+  opacity: 0.68;
+}
+[${TRANSLATION_ATTR}] [data-translate-bot-refresh="true"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.35em;
+  height: 1.35em;
+  min-height: 1.35em;
+  margin-left: 0.35em;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: 1.2;
+  cursor: pointer;
+  opacity: 0.7;
+}
+[${TRANSLATION_ATTR}] [data-translate-bot-refresh="true"]:hover {
+  opacity: 0.95;
+}
+[${TRANSLATION_ATTR}] [data-translate-bot-refresh-icon="true"] {
+  display: inline-block;
+  width: 0.95em;
+  height: 0.95em;
+  opacity: 0.68;
+}
+@media (prefers-reduced-motion: reduce) {
+  [${TRANSLATION_ATTR}] [data-translate-bot-loading-spinner="true"] {
+    animation: none;
+  }
+}
+`;
+  (document.head ?? document.documentElement).append(style);
 }
 
 function batchSizeForProvider(provider: ExtensionSettings["provider"]): number {

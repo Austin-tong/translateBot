@@ -18,3 +18,9 @@ export interface StatusResponse {
   model?: string;
   error?: string;
 }
+
+export interface ToggleResponse {
+  ok: boolean;
+  error?: string;
+  status?: StatusResponse;
+}

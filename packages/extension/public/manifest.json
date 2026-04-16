@@ -11,7 +11,7 @@
     "service_worker": "background.js"
   },
   "permissions": ["activeTab", "scripting", "storage"],
-  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "host_permissions": ["http://*/*", "https://*/*"],
   "commands": {
     "toggle-translation": {
       "suggested_key": {
