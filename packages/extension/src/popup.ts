@@ -116,10 +116,24 @@ async function checkProxy(): Promise<void> {
     const response = await fetch(`${settings.proxyUrl}/health`);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const body = (await response.json()) as { openaiAuth?: string; openaiModel?: string; lmstudioBaseUrl?: string; ollamaModel?: string; ollamaBaseUrl?: string };
-    setStatus(`Proxy ready. OpenAI auth: ${body.openaiAuth ?? "unknown"}. Ollama: ${body.ollamaModel ?? "unknown"}.`);
+    const openaiAuthDetail = settings.provider === "openai" ? await fetchOpenAIAuthDetail(settings.proxyUrl) : body.openaiAuth ?? "not checked";
+    await refreshSetupAssistant(settings.proxyUrl);
+    setStatus(`Proxy ready. OpenAI auth: ${openaiAuthDetail}. Ollama: ${body.ollamaModel ?? "unknown"}.`);
   } catch (error) {
     const message = error instanceof Error ? error.message : "unknown error";
     setStatus(`Proxy unavailable: ${message}`);
+  }
+}
+
+async function fetchOpenAIAuthDetail(proxy: string): Promise<string> {
+  try {
+    const response = await fetch(`${proxy}/auth/openai/status`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const body = (await response.json()) as { loggedIn?: boolean; detail?: string };
+    if (body.detail) return body.detail;
+    return body.loggedIn ? "OpenAI Codex OAuth is ready." : "OpenAI Codex OAuth is not ready.";
+  } catch (error) {
+    return `unknown (${formatError(error)})`;
   }
 }
 

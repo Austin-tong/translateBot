@@ -9,7 +9,7 @@ cd <repo-root>
 ./scripts/bootstrap-local.sh
 ```
 
-这一步会安装依赖、检测本地运行时、写入 `packages/proxy/.env`，并构建可加载的 unpacked extension。
+这一步会安装依赖、检测本地运行时、写入 `packages/proxy/.env`，构建可加载的 unpacked extension，并在最后直接启动本地 proxy。
 
 如果你想先检查本机环境，再继续 bootstrap，可以运行：
 
@@ -17,15 +17,19 @@ cd <repo-root>
 npm run doctor:local
 ```
 
-## 2. 启动本机代理
+## 2. 保持本机代理运行
 
-bootstrap 完成后，启动本机代理：
+bootstrap 完成后，脚本不会立即退出，而是会直接以前台方式运行本机 proxy。
+
+- 看到 `translate-bot proxy listening on ...` 说明 proxy 已经启动
+- 需要停止时，直接按 `Ctrl+C`
+- 如果你后面手动重启，也可以单独运行：
 
 ```bash
 npm run dev:proxy
 ```
 
-代理启动后，扩展会通过本机 proxy 访问所选 provider。
+代理运行后，扩展会通过本机 proxy 访问所选 provider。
 
 ## 3. 加载扩展
 
@@ -52,7 +56,7 @@ Edge、Arc、Brave 等 Chromium 内核浏览器的流程类似。
 - setup status 评估到的本地 provider/model 是否可用
 - 需要时下一步该做什么，例如启动 proxy 或切换到推荐的本地模型
 
-如果这里显示有缺失，先检查 `npm run dev:proxy` 是否已经在运行，因为这通常是最常见的缺失条件之一。若本机环境还没准备好，再运行 `npm run doctor:local`；只有在 bootstrap 尚未完成时，才重新执行 `./scripts/bootstrap-local.sh`。
+如果这里显示有缺失，先检查当前终端里的 proxy 是否仍在运行；这通常是最常见的缺失条件之一。若 proxy 已停止，可以重新执行 `npm run dev:proxy`。若本机环境还没准备好，再运行 `npm run doctor:local`；只有在 bootstrap 尚未完成时，才重新执行 `./scripts/bootstrap-local.sh`。
 
 ## 5. 本地 provider
 

@@ -278,6 +278,29 @@ describe("content translation runtime", () => {
     await settleRuntime();
   });
 
+  it("retries failed Ollama batches by splitting them into smaller requests", async () => {
+    const bodies: ProxyRequest[] = [];
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as ProxyRequest;
+      bodies.push(body);
+      if (bodies.length === 1) {
+        return new Response(JSON.stringify({ error: "This operation was aborted" }), { status: 500 });
+      }
+      return translationResponse(body.segments, "translated");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new TranslationRuntime();
+    document.body.innerHTML = `<main>${Array.from({ length: 8 }, (_, index) => `<p id="p${index}">Ollama paragraph ${index} is long enough to trigger translation retry behavior in the browser runtime.</p>`).join("")}</main>`;
+
+    await runtime.toggle({ provider: "ollama", proxyUrl: "http://proxy.test" });
+    await settleRuntime(200);
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(bodies.map((body) => body.segments.length)).toEqual([8, 4, 4]);
+    expect(document.querySelectorAll("[data-translate-bot-translation][data-translate-bot-state='done']")).toHaveLength(8);
+    expect(document.querySelectorAll("[data-translate-bot-translation][data-translate-bot-state='error']")).toHaveLength(0);
+  });
+
   it("recalls repeated text from persistent storage before calling the model", async () => {
     const localStore: Record<string, unknown> = {};
     vi.stubGlobal("chrome", {

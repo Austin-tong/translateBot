@@ -377,34 +377,7 @@ export class TranslationRuntime {
       url: location.href
     });
     try {
-      const response = await fetch(`${settings.proxyUrl}/translate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          provider: settings.provider,
-          model: settings.model,
-          targetLanguage: "zh-CN",
-          page: {
-            url: location.href,
-            title: document.title,
-            lang: document.documentElement.lang
-          },
-          segments: records.map((record) => ({
-            id: record.id,
-            text: record.text,
-            // 给模型一点邻近文本，避免把网页片段当成孤立句子翻译。
-            contextBefore: getSiblingText(record.element, "previousElementSibling"),
-            contextAfter: getSiblingText(record.element, "nextElementSibling")
-          }))
-        })
-      });
-
-      if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`Proxy returned ${response.status}: ${body.slice(0, 180)}`);
-      }
-
-      const payload = (await response.json()) as TranslateProxyResponse;
+      const payload = await this.requestTranslationsWithRetry(records, settings);
       if (!this.enabled || this.runId !== batchRunId) return;
       console.info(`${LOG_PREFIX} translation response`, {
         provider: settings.provider,
@@ -443,6 +416,61 @@ export class TranslationRuntime {
         for (const record of records) markRecordError(record, this.error);
       });
     }
+  }
+
+  private async requestTranslationsWithRetry(records: SegmentRecord[], settings: ExtensionSettings): Promise<TranslateProxyResponse> {
+    try {
+      return await this.requestTranslations(records, settings);
+    } catch (error) {
+      if (settings.provider !== "ollama" || records.length <= 1) throw error;
+
+      const midpoint = Math.ceil(records.length / 2);
+      const left = records.slice(0, midpoint);
+      const right = records.slice(midpoint);
+      console.warn(`${LOG_PREFIX} ollama batch failed; retrying with smaller batches`, {
+        provider: settings.provider,
+        model: settings.model ?? "default",
+        segments: records.length,
+        split: [left.length, right.length],
+        error: formatError(error)
+      });
+      const leftPayload = await this.requestTranslationsWithRetry(left, settings);
+      const rightPayload = await this.requestTranslationsWithRetry(right, settings);
+      return {
+        segments: [...leftPayload.segments, ...rightPayload.segments]
+      };
+    }
+  }
+
+  private async requestTranslations(records: SegmentRecord[], settings: ExtensionSettings): Promise<TranslateProxyResponse> {
+    const response = await fetch(`${settings.proxyUrl}/translate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: settings.provider,
+        model: settings.model,
+        targetLanguage: "zh-CN",
+        page: {
+          url: location.href,
+          title: document.title,
+          lang: document.documentElement.lang
+        },
+        segments: records.map((record) => ({
+          id: record.id,
+          text: record.text,
+          // 给模型一点邻近文本，避免把网页片段当成孤立句子翻译。
+          contextBefore: getSiblingText(record.element, "previousElementSibling"),
+          contextAfter: getSiblingText(record.element, "nextElementSibling")
+        }))
+      })
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Proxy returned ${response.status}: ${body.slice(0, 180)}`);
+    }
+
+    return (await response.json()) as TranslateProxyResponse;
   }
 
   private async loadPersistentCache(): Promise<void> {
