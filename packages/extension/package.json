@@ -5,6 +5,6 @@
   "type": "module",
   "scripts": {
     "build": "node ../../scripts/build-extension.mjs",
-    "test": "vitest run packages/extension"
+    "test": "vitest run --root ../.. packages/extension/tests/content.test.ts packages/extension/tests/popup.test.ts"
   }
 }

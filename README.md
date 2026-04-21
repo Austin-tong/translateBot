@@ -1,29 +1,21 @@
 # Translate Bot
 
-Local Chrome/Chromium page translation extension with a Node proxy for Ollama, OpenAI, and LM Studio models.
+Translate Bot is a local-first Chromium page translation plugin. It is designed to translate pages in place with local models first, using Ollama or LM Studio, while keeping OpenAI available as an optional advanced path.
 
-## Install
+## Quick Start
 
 ```bash
-npm install
-npm run build
-cp packages/proxy/.env.example packages/proxy/.env
+cd /path/to/translateBot
+./scripts/bootstrap-local.sh
+npm run dev:proxy
 ```
 
-For OpenAI cloud translation, this project uses OpenAI Codex OAuth in the local proxy instead of an API key or the local `codex` CLI.
+Clone the repo first, then run the bootstrap script from the project root. The bootstrap flow installs dependencies, detects local runtimes, writes `packages/proxy/.env`, and builds the unpacked extension.
 
-After starting the proxy, choose `OpenAI Codex OAuth` in the extension popup and click `Open OpenAI login`. The proxy opens the browser authorization flow and stores its local OAuth token at `~/.translate-bot/openai-codex-oauth.json`; the extension never stores OpenAI credentials.
+After bootstrap, load the unpacked extension from:
 
-By default the proxy maps `OPENAI_MODEL=default` to `gpt-5.4-mini`. Enter a model name in the popup only when you want to override it.
-
-For LM Studio, start the local server and load a model, then set `LMSTUDIO_MODEL` to that model id.
-
-For Ollama, start the local Ollama service and make sure the model is available. The default local provider is `Ollama`, with `OLLAMA_MODEL=gemma4:e2b`.
-
-## Run
-
-```bash
-npm run dev:proxy
+```text
+packages/extension/dist
 ```
 
 In Chrome or another Chromium browser:
@@ -37,7 +29,28 @@ In Chrome or another Chromium browser:
 
 Detailed browser setup is in [docs/browser-setup.md](docs/browser-setup.md).
 
-The extension calls only the local proxy URL configured in the popup. It does not store an OpenAI API key.
+## Local Providers
+
+### Ollama
+
+Recommended for the default local-first path. Start Ollama locally, make sure the model you want is available, and keep the provider on `Ollama`.
+
+### LM Studio
+
+Supported for local model translation. Start the LM Studio server, load a model, and point the proxy at that model id.
+
+### OpenAI
+
+Optional and advanced. Use this only when you want cloud translation through the local proxy. The extension still talks to the local proxy, not directly to OpenAI.
+
+## What Bootstrap Does
+
+`./scripts/bootstrap-local.sh` is the clone-after bootstrap entrypoint. It:
+
+- installs project dependencies
+- detects local runtimes such as Ollama and LM Studio
+- writes `packages/proxy/.env`
+- builds the unpacked extension output
 
 ## Checks
 

@@ -1,4 +1,28 @@
 export type Provider = "openai" | "lmstudio" | "ollama";
+export type LocalProvider = "ollama" | "lmstudio";
+
+export interface LocalProviderStatus {
+  provider: LocalProvider;
+  baseUrl: string;
+  configuredModel: string;
+  reachable: boolean;
+  availableModels: string[];
+  ready: boolean;
+  detail: string;
+}
+
+export interface SetupStatus {
+  mode: "local-first";
+  configPath: string;
+  envFileExists: boolean;
+  recommendedProvider: LocalProvider;
+  providers: {
+    ollama: LocalProviderStatus;
+    lmstudio: LocalProviderStatus;
+  };
+  nextAction: "create-config" | "start-local-provider" | "select-model" | "ready";
+  nextMessage: string;
+}
 
 export interface PageContext {
   url: string;
@@ -44,6 +68,7 @@ export interface AuthAwareModelAdapter extends ModelAdapter {
 export interface ProxyConfig {
   host: string;
   port: number;
+  configPath: string;
   openaiModel: string;
   openaiCodexAuthPath: string;
   lmstudioBaseUrl: string;

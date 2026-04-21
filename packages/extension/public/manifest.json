@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Translate Bot",
-  "description": "Translate the current page in place with a local model proxy.",
+  "description": "local-first Chromium page translation with Ollama, LM Studio, and optional OpenAI via a local proxy.",
   "version": "0.1.0",
   "action": {
     "default_popup": "popup.html",

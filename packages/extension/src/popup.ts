@@ -1,5 +1,7 @@
 import type { BackgroundMessage, StatusResponse, ToggleResponse } from "./messages.js";
 import { type ExtensionSettings, getSettings, saveSettings } from "./settings.js";
+import { fetchSetupStatus } from "./setup-client.js";
+import { buildPopupSetupState, type PopupSetupState } from "./setup-assistant.js";
 
 const provider = document.querySelector<HTMLSelectElement>("#provider");
 const model = document.querySelector<HTMLInputElement>("#model");
@@ -8,6 +10,9 @@ const status = document.querySelector<HTMLParagraphElement>("#status");
 const toggle = document.querySelector<HTMLButtonElement>("#toggle");
 const health = document.querySelector<HTMLButtonElement>("#health");
 const login = document.querySelector<HTMLButtonElement>("#login");
+const assistantTitle = document.querySelector<HTMLHeadingElement>("#assistantTitle");
+const assistantSummary = document.querySelector<HTMLParagraphElement>("#assistantSummary");
+const assistantChecklist = document.querySelector<HTMLUListElement>("#assistantChecklist");
 
 void init();
 
@@ -17,6 +22,7 @@ async function init(): Promise<void> {
 
   provider?.addEventListener("change", () => {
     clearIncompatibleModelForProvider();
+    updateLoginVisibility();
     void saveCurrentForm();
   });
 
@@ -48,7 +54,18 @@ async function init(): Promise<void> {
     void startCodexLogin();
   });
 
+  updateLoginVisibility();
+  void refreshSetupAssistant(settings.proxyUrl);
   void refreshActiveTabStatus();
+}
+
+async function refreshSetupAssistant(proxy: string): Promise<void> {
+  try {
+    const setupStatus = await fetchSetupStatus(proxy);
+    renderSetupAssistant(buildPopupSetupState(setupStatus), proxy);
+  } catch (error) {
+    renderSetupAssistant(buildPopupSetupState(undefined, formatError(error)), proxy);
+  }
 }
 
 async function saveCurrentForm(): Promise<void> {
@@ -176,6 +193,22 @@ function setStatus(message: string): void {
   if (status) status.textContent = message;
 }
 
+function renderSetupAssistant(state: PopupSetupState, proxyUrl: string): void {
+  if (assistantTitle) assistantTitle.textContent = state.assistantTitle;
+  if (assistantSummary) assistantSummary.textContent = formatAssistantText(state.assistantSummary, proxyUrl);
+  if (assistantChecklist) {
+    assistantChecklist.replaceChildren(
+      ...state.assistantChecklist.map((item) => {
+        const li = document.createElement("li");
+        li.textContent = formatAssistantText(item, proxyUrl);
+        return li;
+      })
+    );
+  }
+  if (toggle) toggle.disabled = !state.translateEnabled;
+  updateLoginVisibility();
+}
+
 function setPageStatus(pageStatus: StatusResponse | undefined): void {
   if (!pageStatus?.enabled) {
     setStatus("Current page: translation is off.");
@@ -194,6 +227,15 @@ function clearIncompatibleModelForProvider(): void {
   const currentModel = model.value.trim();
   if (provider.value === "ollama" && /^gpt-/i.test(currentModel)) model.value = "";
   if (provider.value === "openai" && /^(gemma|qwen|llama|mistral|deepseek)/i.test(currentModel)) model.value = "";
+}
+
+function updateLoginVisibility(): void {
+  if (!login) return;
+  login.hidden = provider?.value !== "openai";
+}
+
+function formatAssistantText(text: string, proxyUrl: string): string {
+  return text.replaceAll("{{proxyUrl}}", proxyUrl);
 }
 
 function formatUpdateStatus(statusResponse: StatusResponse | undefined): string {

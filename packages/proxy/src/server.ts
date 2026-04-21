@@ -3,6 +3,7 @@ import { loadConfig } from "./config.js";
 import { LMStudioAdapter } from "./adapters/lmstudio.js";
 import { OllamaAdapter } from "./adapters/ollama.js";
 import { CodexAdapter } from "./adapters/codex.js";
+import { getSetupStatus } from "./setup.js";
 import type { AuthAwareModelAdapter, ModelAdapter, Provider, TranslateRequest } from "./types.js";
 
 const config = loadConfig();
@@ -34,6 +35,11 @@ const server = createServer(async (request, response) => {
         ollamaBaseUrl: config.ollamaBaseUrl,
         ollamaModel: config.ollamaModel
       });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/setup/status") {
+      sendJson(response, 200, await getSetupStatus(config));
       return;
     }
 

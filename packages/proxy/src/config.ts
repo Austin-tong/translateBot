@@ -1,5 +1,9 @@
-import "dotenv/config";
+import { config as loadDotenv } from "dotenv";
+import { fileURLToPath } from "node:url";
 import type { ProxyConfig } from "./types.js";
+
+const configPath = fileURLToPath(new URL("../.env", import.meta.url));
+loadDotenv({ path: configPath });
 
 function numberFromEnv(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -12,6 +16,7 @@ export function loadConfig(): ProxyConfig {
   return {
     host: process.env.HOST ?? "127.0.0.1",
     port: numberFromEnv("PORT", 8787),
+    configPath,
     openaiModel: process.env.OPENAI_MODEL ?? "default",
     openaiCodexAuthPath: process.env.OPENAI_CODEX_AUTH_PATH ?? "~/.translate-bot/openai-codex-oauth.json",
     lmstudioBaseUrl: process.env.LMSTUDIO_BASE_URL ?? "http://localhost:1234/v1",

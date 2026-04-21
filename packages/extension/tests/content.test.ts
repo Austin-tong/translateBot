@@ -178,7 +178,9 @@ describe("content translation runtime", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    delete (document as Document & { elementFromPoint?: Document["elementFromPoint"] }).elementFromPoint;
     document.body.innerHTML = "";
   });
 
@@ -393,6 +395,75 @@ describe("content translation runtime", () => {
 
     expect(document.querySelector("[data-translate-bot-translation]")?.textContent).toContain("SECOND");
   });
+
+  it("keeps the same block centered while translations are added and removed", async () => {
+    mockTranslationFetch();
+    const runtime = new TranslationRuntime();
+    document.body.innerHTML = `
+      <main>
+        <p id="before">Before paragraph has enough English words for translation.</p>
+        <p id="anchor">Anchor paragraph has enough English words to stay centered.</p>
+      </main>
+    `;
+    const before = document.querySelector("#before") as HTMLParagraphElement;
+    const anchor = document.querySelector("#anchor") as HTMLParagraphElement;
+    let scrollOffset = 0;
+    const anchorBaseTop = 480;
+
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 800 });
+    Object.defineProperty(document, "elementFromPoint", { configurable: true, value: vi.fn(() => anchor) });
+    before.getBoundingClientRect = vi.fn(() => mockRect(100 - scrollOffset));
+    anchor.getBoundingClientRect = vi.fn(() => mockRect(anchorBaseTop + translationHeight(before) - scrollOffset));
+    const scrollBy = vi.spyOn(window, "scrollBy").mockImplementation(((x?: number | ScrollToOptions, y?: number) => {
+      scrollOffset += typeof x === "object" ? Number(x.top ?? 0) : Number(y ?? 0);
+    }) as Window["scrollBy"]);
+
+    expect(anchor.getBoundingClientRect().top).toBe(anchorBaseTop);
+
+    await runtime.toggle({ provider: "openai", proxyUrl: "http://proxy.test" });
+    await settleRuntime(1000);
+
+    expect(scrollBy).toHaveBeenCalled();
+    expect(anchor.getBoundingClientRect().top).toBe(anchorBaseTop);
+
+    runtime.disable();
+
+    expect(anchor.getBoundingClientRect().top).toBe(anchorBaseTop);
+  });
+
+  it("keeps centered media stable when text above it is translated", async () => {
+    mockTranslationFetch();
+    const runtime = new TranslationRuntime();
+    document.body.innerHTML = `
+      <article id="post">
+        <p id="copy">Media caption above the image has enough English words for translation.</p>
+        <img id="chart" alt="Chart">
+      </article>
+    `;
+    const post = document.querySelector("#post") as HTMLElement;
+    const copy = document.querySelector("#copy") as HTMLParagraphElement;
+    const chart = document.querySelector("#chart") as HTMLImageElement;
+    let scrollOffset = 0;
+    const chartBaseTop = 480;
+
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 800 });
+    Object.defineProperty(document, "elementFromPoint", { configurable: true, value: vi.fn(() => chart) });
+    post.getBoundingClientRect = vi.fn(() => mockRect(100 - scrollOffset, 700 + translationHeight(copy)));
+    copy.getBoundingClientRect = vi.fn(() => mockRect(120 - scrollOffset));
+    chart.getBoundingClientRect = vi.fn(() => mockRect(chartBaseTop + translationHeight(copy) - scrollOffset, 300));
+    vi.spyOn(window, "scrollBy").mockImplementation(((x?: number | ScrollToOptions, y?: number) => {
+      scrollOffset += typeof x === "object" ? Number(x.top ?? 0) : Number(y ?? 0);
+    }) as Window["scrollBy"]);
+
+    expect(chart.getBoundingClientRect().top).toBe(chartBaseTop);
+
+    await runtime.toggle({ provider: "openai", proxyUrl: "http://proxy.test" });
+    await settleRuntime(1000);
+
+    expect(chart.getBoundingClientRect().top).toBe(chartBaseTop);
+  });
 });
 
 class FakeIntersectionObserver {
@@ -446,6 +517,26 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reje
     reject = promiseReject;
   });
   return { promise, resolve, reject };
+}
+
+function translationHeight(element: Element): number {
+  const translation = element.querySelector("[data-translate-bot-translation]");
+  if (!translation) return 0;
+  return translation.getAttribute("data-translate-bot-state") === "done" ? 120 : 80;
+}
+
+function mockRect(top: number, height = 40): DOMRect {
+  return {
+    x: 0,
+    y: top,
+    width: 500,
+    height,
+    top,
+    right: 500,
+    bottom: top + height,
+    left: 0,
+    toJSON: () => ({})
+  } as DOMRect;
 }
 
 async function settleRuntime(ms = 160): Promise<void> {

@@ -11,6 +11,7 @@ const UI_LABEL_ANCESTOR_SELECTOR = "button, nav, [role='button'], [role='navigat
 const UI_LABEL_TAGS = new Set(["SPAN", "A", "BUTTON"]);
 const BLOCK_TRANSLATION_TAGS = new Set(["P", "LI", "DD", "DT", "BLOCKQUOTE", "FIGCAPTION", "SUMMARY", "H1", "H2", "H3", "H4", "H5", "H6"]);
 const CONTAINER_TAGS = new Set(["ARTICLE", "ASIDE", "BODY", "FOOTER", "FORM", "HEADER", "MAIN", "NAV", "OL", "SECTION", "TABLE", "TBODY", "TD", "TH", "THEAD", "TR", "UL"]);
+const VIEWPORT_ANCHOR_SELECTOR = `[${RECORD_ATTR}], p, li, dd, dt, blockquote, figcaption, summary, h1, h2, h3, h4, h5, h6, div, article, section, span, a, img, video, canvas, [role='img']`;
 const GENERIC_TEXT_CONTAINER_TAGS = new Set(["DIV", "ARTICLE", "SECTION"]);
 const STRUCTURAL_CHILD_TAGS = new Set([...BLOCK_TRANSLATION_TAGS, ...CONTAINER_TAGS, "DIV"]);
 const INLINE_TEXT_CHILD_TAGS = new Set(["A", "ABBR", "B", "BDI", "BDO", "BR", "CITE", "DEL", "DFN", "EM", "I", "INS", "KBD", "MARK", "Q", "S", "SMALL", "SPAN", "STRONG", "SUB", "SUP", "TIME", "U", "VAR", "WBR"]);
@@ -63,6 +64,11 @@ interface CandidateDecision {
   ok: boolean;
   reason: string;
   text: string;
+}
+
+interface ViewportAnchor {
+  element: HTMLElement;
+  topOffsetFromCenter: number;
 }
 
 export class TranslationRuntime {
@@ -131,6 +137,7 @@ export class TranslationRuntime {
   }
 
   disable(): void {
+    const anchor = captureViewportAnchor();
     this.enabled = false;
     this.settings = undefined;
     this.queue = [];
@@ -154,6 +161,7 @@ export class TranslationRuntime {
       restoreRecord(record);
     }
     this.records.clear();
+    restoreViewportAnchor(anchor);
   }
 
   private installObservers(): void {
@@ -237,7 +245,7 @@ export class TranslationRuntime {
 
     const cached = this.cache.get(record.hash);
     if (cached) {
-      applyTranslation(record, cached);
+      mutatePreservingViewportCenter(() => applyTranslation(record, cached));
       record.status = "done";
       this.translated += 1;
       this.touchCache(record.hash);
@@ -266,7 +274,7 @@ export class TranslationRuntime {
     if (!isTranslatableText(text)) {
       this.queue = this.queue.filter((queuedId) => queuedId !== record.id);
       this.intersectionObserver?.unobserve(record.element);
-      restoreRecord(record);
+      mutatePreservingViewportCenter(() => restoreRecord(record));
       this.records.delete(record.id);
       return true;
     }
@@ -274,13 +282,15 @@ export class TranslationRuntime {
     record.text = text;
     record.hash = hash;
     record.status = "pending";
-    record.translationElement?.remove();
-    record.translationElement = undefined;
+    mutatePreservingViewportCenter(() => {
+      record.translationElement?.remove();
+      record.translationElement = undefined;
+    });
     this.intersectionObserver?.unobserve(record.element);
 
     const cached = this.cache.get(hash);
     if (cached) {
-      applyTranslation(record, cached);
+      mutatePreservingViewportCenter(() => applyTranslation(record, cached));
       record.status = "done";
       this.translated += 1;
       this.touchCache(hash);
@@ -296,7 +306,7 @@ export class TranslationRuntime {
     const record = this.records.get(id);
     if (!record || record.status !== "pending" || this.queue.includes(id)) return;
     record.status = "queued";
-    applyLoading(record);
+    mutatePreservingViewportCenter(() => applyLoading(record));
     this.queue.push(id);
   }
 
@@ -309,7 +319,7 @@ export class TranslationRuntime {
     if (!isTranslatableText(text)) {
       this.queue = this.queue.filter((queuedId) => queuedId !== record.id);
       this.intersectionObserver?.unobserve(record.element);
-      restoreRecord(record);
+      mutatePreservingViewportCenter(() => restoreRecord(record));
       this.records.delete(record.id);
       return;
     }
@@ -405,18 +415,20 @@ export class TranslationRuntime {
         durationMs: Math.round(performance.now() - startedAt)
       });
       const byId = new Map(payload.segments.map((segment) => [segment.id, segment.translation]));
-      for (const record of records) {
-        if (record.hash !== requestedHashes.get(record.id)) continue;
-        const translation = byId.get(record.id);
-        if (!translation) {
-          markRecordError(record, "No translation returned.");
-          continue;
+      mutatePreservingViewportCenter(() => {
+        for (const record of records) {
+          if (record.hash !== requestedHashes.get(record.id)) continue;
+          const translation = byId.get(record.id);
+          if (!translation) {
+            markRecordError(record, "No translation returned.");
+            continue;
+          }
+          applyTranslation(record, translation);
+          record.status = "done";
+          this.rememberTranslation(record.hash, record.text, translation);
+          this.translated += 1;
         }
-        applyTranslation(record, translation);
-        record.status = "done";
-        this.rememberTranslation(record.hash, record.text, translation);
-        this.translated += 1;
-      }
+      });
     } catch (error) {
       if (!this.enabled || this.runId !== batchRunId) return;
       this.error = error instanceof Error ? error.message : "Translation failed.";
@@ -427,7 +439,9 @@ export class TranslationRuntime {
         ids: records.map((record) => record.id),
         error: this.error
       });
-      for (const record of records) markRecordError(record, this.error);
+      mutatePreservingViewportCenter(() => {
+        for (const record of records) markRecordError(record, this.error);
+      });
     }
   }
 
@@ -626,6 +640,7 @@ function prepareTranslationElement(record: SegmentRecord): HTMLSpanElement {
     translationElement.style.whiteSpace = "pre-wrap";
   }
   translationElement.style.overflowWrap = "break-word";
+  translationElement.style.setProperty("overflow-anchor", "none");
   if (!record.translationElement) record.element.append(translationElement);
   record.translationElement = translationElement;
   return translationElement;
@@ -841,6 +856,105 @@ function isElementNearViewport(element: Element): boolean {
   const rect = element.getBoundingClientRect();
   if (rect.width === 0 && rect.height === 0) return true;
   return rect.bottom >= -NEAR_VIEWPORT_MARGIN && rect.top <= window.innerHeight + NEAR_VIEWPORT_MARGIN;
+}
+
+function mutatePreservingViewportCenter<T>(mutate: () => T): T {
+  const anchor = captureViewportAnchor();
+  const result = mutate();
+  restoreViewportAnchor(anchor);
+  scheduleViewportAnchorRestore(anchor);
+  return result;
+}
+
+function captureViewportAnchor(): ViewportAnchor | undefined {
+  if (typeof window === "undefined" || !document.body) return undefined;
+  const centerX = window.innerWidth / 2;
+  const centerY = window.innerHeight / 2;
+  const pointElement = typeof document.elementFromPoint === "function" ? document.elementFromPoint(centerX, centerY) : null;
+  const pointAnchor = pointElement ? anchorElementFrom(pointElement) : undefined;
+  const element = pointAnchor ?? findNearestViewportAnchor(centerY);
+  if (!element) return undefined;
+  const rect = element.getBoundingClientRect();
+  if (!isUsableRect(rect)) return undefined;
+  return {
+    element,
+    topOffsetFromCenter: rect.top - centerY
+  };
+}
+
+function restoreViewportAnchor(anchor: ViewportAnchor | undefined): void {
+  if (!anchor || !anchor.element.isConnected) return;
+  const rect = anchor.element.getBoundingClientRect();
+  if (!isUsableRect(rect)) return;
+  const expectedTop = window.innerHeight / 2 + anchor.topOffsetFromCenter;
+  const delta = rect.top - expectedTop;
+  if (Math.abs(delta) < 1) return;
+  scrollByAnchorDelta(anchor, delta);
+}
+
+function scheduleViewportAnchorRestore(anchor: ViewportAnchor | undefined): void {
+  if (!anchor) return;
+  const restore = () => restoreViewportAnchor(anchor);
+  if (typeof window.requestAnimationFrame === "function") {
+    window.requestAnimationFrame(() => {
+      restore();
+      window.requestAnimationFrame(restore);
+    });
+    return;
+  }
+  window.setTimeout(restore, 0);
+}
+
+function scrollByAnchorDelta(anchor: ViewportAnchor, delta: number): void {
+  const scroller = findScrollContainer(anchor.element);
+  if (scroller) {
+    scroller.scrollTop += delta;
+    return;
+  }
+  if (typeof window.scrollBy === "function") window.scrollBy(0, delta);
+}
+
+function anchorElementFrom(element: Element): HTMLElement | undefined {
+  const translationElement = element.closest<HTMLElement>(`[${TRANSLATION_ATTR}]`);
+  const translationRecord = translationElement?.parentElement?.closest<HTMLElement>(`[${RECORD_ATTR}]`);
+  if (translationRecord) return translationRecord;
+  if (element instanceof HTMLElement && isUsableRect(element.getBoundingClientRect()) && element !== document.body && element !== document.documentElement) {
+    return element;
+  }
+  const recordElement = element.closest<HTMLElement>(`[${RECORD_ATTR}]`);
+  if (recordElement) return recordElement;
+  const anchor = element.closest<HTMLElement>(VIEWPORT_ANCHOR_SELECTOR);
+  if (!anchor || anchor === document.body || anchor === document.documentElement || !isUsableRect(anchor.getBoundingClientRect())) return undefined;
+  return anchor;
+}
+
+function findNearestViewportAnchor(centerY: number): HTMLElement | undefined {
+  let best: { element: HTMLElement; distance: number; height: number } | undefined;
+  for (const element of document.querySelectorAll<HTMLElement>(VIEWPORT_ANCHOR_SELECTOR)) {
+    if (element === document.body || element === document.documentElement) continue;
+    const rect = element.getBoundingClientRect();
+    if (!isUsableRect(rect)) continue;
+    const distance = rect.top <= centerY && rect.bottom >= centerY ? 0 : Math.min(Math.abs(rect.top - centerY), Math.abs(rect.bottom - centerY));
+    if (!best || distance < best.distance || (distance === best.distance && rect.height < best.height)) {
+      best = { element, distance, height: rect.height };
+    }
+  }
+  return best?.element;
+}
+
+function isUsableRect(rect: DOMRect): boolean {
+  return Number.isFinite(rect.top) && Number.isFinite(rect.bottom) && (rect.width > 0 || rect.height > 0 || rect.top !== 0 || rect.bottom !== 0);
+}
+
+function findScrollContainer(element: HTMLElement): HTMLElement | undefined {
+  for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+    if (parent === document.body || parent === document.documentElement) return undefined;
+    const style = window.getComputedStyle(parent);
+    if (!/(auto|scroll|overlay)/.test(style.overflowY)) continue;
+    if (parent.scrollHeight <= parent.clientHeight) continue;
+    return parent;
+  }
+  return undefined;
 }
 
 function getSiblingText(element: Element, key: "previousElementSibling" | "nextElementSibling"): string {

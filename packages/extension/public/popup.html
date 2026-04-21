@@ -11,6 +11,12 @@
       <h1>Translate Bot</h1>
       <p id="status">Ready.</p>
 
+      <section class="assistant-card" aria-label="Setup assistant">
+        <h2 id="assistantTitle">Set up the local proxy</h2>
+        <p id="assistantSummary">Translation is disabled until the proxy is ready.</p>
+        <ul id="assistantChecklist"></ul>
+      </section>
+
       <label>
         Provider
         <select id="provider">
@@ -34,7 +40,7 @@
         <button id="toggle">Translate page</button>
         <button id="health" type="button">Check proxy</button>
       </div>
-      <button id="login" type="button" class="secondary">Open OpenAI login</button>
+      <button id="login" type="button" class="secondary" hidden>Open OpenAI login</button>
     </main>
     <script src="popup.js"></script>
   </body>

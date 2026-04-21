@@ -2,12 +2,16 @@
   "name": "translate-bot",
   "private": true,
   "version": "0.1.0",
+  "description": "local-first Chromium page translation plugin with clone-after bootstrap flow.",
   "type": "module",
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
     "build": "npm run build --workspaces",
+    "setup:local": "tsx scripts/setup-local.ts",
+    "doctor:local": "tsx scripts/setup-local.ts --check",
+    "bootstrap:local": "bash ./scripts/bootstrap-local.sh",
     "test": "vitest run",
     "test:e2e:extension": "npm run build:extension && node scripts/e2e-extension-smoke.mjs",
     "test:watch": "vitest",
