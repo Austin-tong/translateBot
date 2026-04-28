@@ -5,6 +5,7 @@ import type { ProxyConfig } from "./types.js";
 const configPath = fileURLToPath(new URL("../.env", import.meta.url));
 loadDotenv({ path: configPath });
 
+/** 从环境变量读取数字型配置，非法值回退到默认值。 */
 function numberFromEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (!raw) return fallback;
@@ -12,6 +13,7 @@ function numberFromEnv(name: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+/** 组装代理进程的运行配置，并把 `.env` 路径一并暴露给 setup 流程。 */
 export function loadConfig(): ProxyConfig {
   return {
     host: process.env.HOST ?? "127.0.0.1",

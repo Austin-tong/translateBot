@@ -1,5 +1,9 @@
 import type { TranslateRequest } from "./types.js";
 
+/**
+ * 生成给模型的统一翻译提示词。
+ * 输入是扩展采集好的页面上下文和片段列表，输出是只包含 JSON 要求的纯文本提示。
+ */
 export function buildTranslationPrompt(request: TranslateRequest): string {
   // 每个文本片段都带上前后文，降低逐句硬翻译的概率。
   const segments = request.segments.map((segment) => ({
@@ -25,6 +29,10 @@ export function buildTranslationPrompt(request: TranslateRequest): string {
   ].join("\n");
 }
 
+/**
+ * 解析模型返回的 JSON 翻译结果。
+ * 只接受和请求里的 segment id 一一对应的翻译，避免模型多写内容时污染页面。
+ */
 export function parseTranslationJson(raw: string, expectedIds: Set<string>): Array<{ id: string; translation: string }> {
   const trimmed = raw.trim();
   // 模型偶尔会包一层 Markdown 代码块，这里做兼容提取后再严格校验结构。
@@ -49,6 +57,7 @@ export function parseTranslationJson(raw: string, expectedIds: Set<string>): Arr
   });
 }
 
+/** 从可能被代码块或额外说明包裹的内容里，尽量提取 JSON 本体。 */
 function extractJson(text: string): string {
   if (text.startsWith("{") && text.endsWith("}")) return text;
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);

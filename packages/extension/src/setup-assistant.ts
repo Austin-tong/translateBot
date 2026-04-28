@@ -1,5 +1,6 @@
 import type { SetupStatus } from "./setup-client.js";
 
+/** popup 顶部 setup 助手区域所需的展示状态。 */
 export interface PopupSetupState {
   assistantTitle: string;
   assistantSummary: string;
@@ -8,6 +9,10 @@ export interface PopupSetupState {
   showAdvancedLogin: boolean;
 }
 
+/**
+ * 把 proxy 返回的 setup 状态压成 popup 里可直接渲染的文案和 checklist。
+ * 这里把“不可用 / 进行中 / 已就绪”三种用户态明确拆开。
+ */
 export function buildPopupSetupState(status?: SetupStatus, error?: string): PopupSetupState {
   if (!status || error) {
     return {
@@ -46,6 +51,7 @@ export function buildPopupSetupState(status?: SetupStatus, error?: string): Popu
   };
 }
 
+/** 根据下一步动作生成一组可执行的检查项。 */
 function buildChecklist(status: SetupStatus): string[] {
   if (status.nextAction === "create-config") {
     return [
@@ -68,6 +74,7 @@ function buildChecklist(status: SetupStatus): string[] {
   ];
 }
 
+/** 把 provider id 转成适合界面展示的名字。 */
 function prettyProviderName(provider: SetupStatus["recommendedProvider"]): string {
   return provider === "ollama" ? "Ollama" : "LM Studio";
 }

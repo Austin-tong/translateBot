@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { applyTranslation, collectCandidateElements, createRecord, isCandidateElement, isTranslatableText, restoreRecord, TranslationRuntime } from "../src/content.js";
+import { applyTranslation, collectCandidateElements, createRecord, hasDuplicateTextBlockConflict, isCandidateElement, isTranslatableText, restoreRecord, TranslationRuntime } from "../src/content.js";
 
 describe("content translation DOM helpers", () => {
   it("collects deepest paragraph-like containers instead of individual text nodes", () => {
@@ -16,6 +16,77 @@ describe("content translation DOM helpers", () => {
     const candidates = collectCandidateElements(document.body);
 
     expect(candidates.map((element) => element.id)).toEqual(["tweetText"]);
+  });
+
+  it("keeps exact duplicate sibling blocks from being translated twice", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
+    let runtime: TranslationRuntime | undefined;
+    try {
+      const fetchMock = mockTranslationFetch();
+      runtime = new TranslationRuntime();
+      document.body.innerHTML = `
+        <main>
+          <article>
+            <p id="first">Duplicate paragraph has enough English words for translation.</p>
+            <p id="second">Duplicate paragraph has enough English words for translation.</p>
+          </article>
+        </main>
+      `;
+
+      await runtime.toggle({ provider: "openai", proxyUrl: "http://proxy.test" });
+      await settleRuntime();
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(document.querySelectorAll("[data-translate-bot-translation]")).toHaveLength(1);
+      expect(document.querySelector("#first [data-translate-bot-translation]")).not.toBeNull();
+      expect(document.querySelector("#second [data-translate-bot-translation]")).toBeNull();
+    } finally {
+      runtime?.disable();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      document.body.innerHTML = "";
+    }
+  });
+
+  it("treats nested same-text blocks as a single translation candidate", () => {
+    document.body.innerHTML = `
+      <main>
+        <h2 id="outer">
+          <div id="inner">Nested duplicate block has enough English words for translation.</div>
+        </h2>
+      </main>
+    `;
+
+    const outer = document.querySelector("#outer") as HTMLElement;
+    const inner = document.querySelector("#inner") as HTMLElement;
+    const outerRecord = createRecord(outer, "outer");
+    const innerRecord = createRecord(inner, "inner");
+
+    expect(hasDuplicateTextBlockConflict(inner, innerRecord.hash, [outerRecord])).toBe(true);
+    expect(hasDuplicateTextBlockConflict(outer, outerRecord.hash, [innerRecord])).toBe(true);
+  });
+
+  it("collects Draft-style longform blocks that wrap inline links in divs", () => {
+    document.body.innerHTML = `
+      <main>
+        <div class="longform-unstyled" data-block="true" data-offset-key="b3rve-0-0">
+          <div id="draft-block" data-offset-key="b3rve-0-0" class="public-DraftStyleDefault-block public-DraftStyleDefault-ltr">
+            <span style="font-weight: bold;"><span data-text="true">1. The </span></span>
+            <div class="link-wrapper">
+              <a href="http://claude.md/" dir="ltr" rel="noopener noreferrer nofollow" target="_blank" role="link">
+                <span style="font-weight: bold;"><span data-text="true">CLAUDE.md</span></span>
+              </a>
+            </div>
+            <span style="font-weight: bold;"><span data-text="true"> is your first artifact on every project.</span></span>
+          </div>
+        </div>
+      </main>
+    `;
+
+    const candidates = collectCandidateElements(document.body);
+
+    expect(candidates.map((element) => element.id)).toEqual(["draft-block"]);
   });
 
   it("skips script, code, editable, hidden, form text, and already translated text", () => {
@@ -168,6 +239,20 @@ describe("content translation DOM helpers", () => {
     expect(isTranslatableText("This page explains translation quality.")).toBe(true);
   });
 
+  it("skips elements tagged as Chinese while still allowing nested English blocks", () => {
+    document.body.innerHTML = `
+      <main>
+        <div id="zh" lang="zh">YC 刚刚扔出的这份创业指南，直接把未来公司的形态重新定义了。</div>
+        <div id="container" lang="zh">
+          <div id="en" lang="en">This English block should still translate correctly.</div>
+        </div>
+      </main>
+    `;
+
+    expect(isCandidateElement(document.querySelector("#zh") as HTMLElement)).toBe(false);
+    expect(isCandidateElement(document.querySelector("#en") as HTMLElement)).toBe(true);
+  });
+
 });
 
 describe("content translation runtime", () => {
@@ -232,6 +317,41 @@ describe("content translation runtime", () => {
     expect(text).toContain("\n- No framework, just one .md file\n\n100% open-source.");
   });
 
+  it("translates longform headings once and Draft longform blocks once", async () => {
+    const fetchMock = mockTranslationFetch();
+    const runtime = new TranslationRuntime();
+    document.body.innerHTML = `
+      <main>
+        <h2 id="heading" class="longform-header-two">
+          <div class="public-DraftStyleDefault-block public-DraftStyleDefault-ltr">
+            <span><span data-text="true">The five habits that get you there</span></span>
+          </div>
+        </h2>
+        <div class="longform-unstyled" data-block="true" data-offset-key="qs7m-0-0">
+          <div id="draft-block" data-offset-key="qs7m-0-0" class="public-DraftStyleDefault-block public-DraftStyleDefault-ltr">
+            <span><span data-text="true">Before you open Figma. Before you sketch. You write a </span></span>
+            <div class="link-wrapper">
+              <a href="http://claude.md/" dir="ltr" rel="noopener noreferrer nofollow" target="_blank" role="link">
+                <span><span data-text="true">CLAUDE.md</span></span>
+              </a>
+            </div>
+            <span><span data-text="true">. Brand voice, color tokens, type scale, components you have, components you will not allow.</span></span>
+          </div>
+        </div>
+      </main>
+    `;
+
+    await runtime.toggle({ provider: "openai", proxyUrl: "http://proxy.test" });
+    await settleRuntime();
+
+    const firstRequest = requestBody(fetchMock, 0).segments.map((segment) => segment.text);
+    expect(firstRequest).toContain("The five habits that get you there");
+    expect(firstRequest.some((text) => text.includes("Before you open Figma. Before you sketch.") && text.includes("CLAUDE.md") && text.includes("Brand voice, color tokens, type scale"))).toBe(true);
+    expect(document.querySelectorAll("#heading [data-translate-bot-translation]")).toHaveLength(1);
+    expect(document.querySelectorAll("#draft-block [data-translate-bot-translation]")).toHaveLength(1);
+    expect(document.querySelectorAll("[data-translate-bot-translation]")).toHaveLength(2);
+  });
+
   it("keeps every dynamic root discovered within the debounce window", async () => {
     const fetchMock = mockTranslationFetch();
     const runtime = new TranslationRuntime();
@@ -248,6 +368,26 @@ describe("content translation runtime", () => {
     const texts = fetchMock.mock.calls.flatMap(([_url, init]) => requestSegments(init).map((segment) => segment.text));
     expect(texts).toContain("First dynamic paragraph has enough English words for translation.");
     expect(texts).toContain("Second dynamic paragraph has enough English words for translation.");
+  });
+
+  it("does not translate blocks explicitly marked as Chinese", async () => {
+    const fetchMock = mockTranslationFetch();
+    const runtime = new TranslationRuntime();
+    document.body.innerHTML = `
+      <main>
+        <div id="copy" lang="zh">
+          YC 刚刚扔出的这份创业指南，直接把未来公司的形态重新定义了。
+          他们不是教你怎么用AI提高效率，而是告诉你怎么用AI重新发明公司。
+          因为AI不再是工具，而是公司的操作系统（OS）。
+        </div>
+      </main>
+    `;
+
+    await runtime.toggle({ provider: "openai", proxyUrl: "http://proxy.test" });
+    await settleRuntime();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-translate-bot-translation]")).toBeNull();
   });
 
   it("uses smaller single-flight batches for Ollama", async () => {

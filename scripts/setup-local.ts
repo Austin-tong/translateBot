@@ -7,6 +7,7 @@ import { loadConfig } from "../packages/proxy/src/config.js";
 import { getSetupStatus, renderLocalEnv } from "../packages/proxy/src/setup.js";
 import type { LocalProvider, SetupStatus } from "../packages/proxy/src/types.js";
 
+/** setup CLI 接受的开关，控制是否交互、是否只检查、是否覆盖现有 env。 */
 export interface SetupCliFlags {
   yes: boolean;
   check: boolean;
@@ -15,6 +16,7 @@ export interface SetupCliFlags {
   model?: string;
 }
 
+/** 解析命令行参数，把 `--provider` / `--model` / 行为开关收敛成结构化 flags。 */
 export function parseArgs(argv: string[]): SetupCliFlags {
   return argv.reduce<SetupCliFlags>((flags, arg) => {
     if (arg === "--yes") {
@@ -50,6 +52,7 @@ export function parseArgs(argv: string[]): SetupCliFlags {
   });
 }
 
+/** 在不进入交互模式时，根据状态和 flags 选择最终 provider/model。 */
 export function chooseSetupProvider(status: SetupStatus, flags: SetupCliFlags): { provider: "ollama" | "lmstudio"; model: string } {
   const provider = flags.provider ?? status.recommendedProvider;
   const statusForProvider = status.providers[provider];
@@ -60,6 +63,7 @@ export function chooseSetupProvider(status: SetupStatus, flags: SetupCliFlags): 
   };
 }
 
+/** setup CLI 主流程：读状态、必要时交互、最后把 `.env` 写到 proxy 配置路径。 */
 async function main(): Promise<void> {
   const flags = parseArgs(process.argv.slice(2));
   const config = loadConfig();
@@ -84,6 +88,7 @@ async function main(): Promise<void> {
   console.log("[translate-bot] next: npm run build && npm run dev:proxy");
 }
 
+/** 非交互时直接用推荐项；交互时允许用户临时改 provider/model。 */
 async function selectSetupProvider(status: SetupStatus, flags: SetupCliFlags): Promise<{ provider: "ollama" | "lmstudio"; model: string }> {
   if (flags.yes || !stdin.isTTY) {
     return chooseSetupProvider(status, flags);
@@ -105,6 +110,7 @@ async function selectSetupProvider(status: SetupStatus, flags: SetupCliFlags): P
   }
 }
 
+/** 已存在配置时，默认不覆盖，除非显式传了 --overwrite。 */
 async function shouldSkipWrite(configPath: string, overwrite: boolean): Promise<boolean> {
   if (overwrite) return false;
 
@@ -116,17 +122,20 @@ async function shouldSkipWrite(configPath: string, overwrite: boolean): Promise<
   }
 }
 
+/** 打印当前 setup 状态的摘要，供 `--check` 和跳过写入时使用。 */
 function printStatus(status: SetupStatus): void {
   console.log(`[translate-bot] ${status.nextMessage}`);
   console.log(`[translate-bot] recommended=${status.recommendedProvider} nextAction=${status.nextAction}`);
 }
 
+/** 校验交互输入里的 provider 选择，空输入则沿用 fallback。 */
 export function resolveInteractiveProvider(answer: string, fallback: LocalProvider): LocalProvider {
   if (answer === "") return fallback;
   if (answer === "ollama" || answer === "lmstudio") return answer;
   throw new Error(`Invalid provider answer: ${answer}`);
 }
 
+/** 解析 `--provider=...` 参数，只接受 setup 已支持的本机 provider。 */
 function parseProviderFlag(arg: string): LocalProvider {
   const value = arg.slice("--provider=".length);
   if (value === "ollama" || value === "lmstudio") {

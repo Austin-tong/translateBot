@@ -26,15 +26,21 @@ interface StoredCodexAuth {
   accountId?: string;
 }
 
+/**
+ * OpenAI Codex 适配器。
+ * 负责三件事：列出可选模型、维护本地 OAuth 凭证、把翻译请求转成 Responses API 调用。
+ */
 export class CodexAdapter implements ModelAdapter {
   private authPromise: Promise<void> | null = null;
 
   constructor(private readonly config: ProxyConfig) {}
 
+  /** 返回代理允许用户选择的 OpenAI 系列模型。 */
   async listModels(): Promise<string[]> {
     return MODEL_IDS;
   }
 
+  /** 读取本地 OAuth 凭证并判断当前是否已登录、能否刷新。 */
   async authStatus(): Promise<{ loggedIn: boolean; detail: string }> {
     if (this.authPromise) {
       return { loggedIn: false, detail: "OpenAI Codex OAuth login is still running in the browser." };
@@ -63,6 +69,10 @@ export class CodexAdapter implements ModelAdapter {
     }
   }
 
+  /**
+   * 启动 OpenAI Codex OAuth 登录。
+   * 这里不把 token 暴露给扩展，只在本地 proxy 中保存和刷新凭证。
+   */
   async startAuth(): Promise<{ started: boolean; detail: string; authUrl?: string }> {
     if (this.authPromise) {
       return {
@@ -109,6 +119,7 @@ export class CodexAdapter implements ModelAdapter {
     };
   }
 
+  /** 把扩展请求转成 Codex Responses 调用，并把结果收敛成 segment id 对齐的 JSON。 */
   async translate(request: TranslateRequest): Promise<TranslateResponse> {
     const model = normalizeModel(request.model ?? this.config.openaiModel);
     const expectedIds = new Set(request.segments.map((segment) => segment.id));
@@ -147,6 +158,7 @@ export class CodexAdapter implements ModelAdapter {
     }
   }
 
+  /** 组装 pi-ai 所需的模型描述，覆盖不同 context window 的已知型号。 */
   private model(id: string): Model<"openai-codex-responses"> {
     return {
       id,
@@ -167,10 +179,15 @@ export class CodexAdapter implements ModelAdapter {
     };
   }
 
+  /** OAuth 凭证落盘路径，支持 `~` 展开。 */
   private authPath(): string {
     return this.config.openaiCodexAuthPath.replace(/^~(?=$|\/)/, homedir());
   }
 
+  /**
+   * 读取或刷新 access token。
+   * 这里会在快过期时主动刷新，避免前端已经开始翻译后才收到鉴权失败。
+   */
   private async resolveAccessToken(): Promise<string> {
     const credentials = await this.loadCredentials();
     if (!credentials) {
@@ -187,6 +204,7 @@ export class CodexAdapter implements ModelAdapter {
     return refreshed.access;
   }
 
+  /** 从本地 JSON 文件加载 Codex OAuth 凭证。 */
   private async loadCredentials(): Promise<StoredCodexAuth | null> {
     try {
       const parsed = JSON.parse(await readFile(this.authPath(), "utf8")) as Partial<StoredCodexAuth>;
@@ -204,6 +222,7 @@ export class CodexAdapter implements ModelAdapter {
     }
   }
 
+  /** 以最小权限写回凭证，避免浏览器回调之外的地方接触敏感 token。 */
   private async saveCredentials(credentials: OAuthCredentials): Promise<void> {
     const path = this.authPath();
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -216,11 +235,13 @@ export class CodexAdapter implements ModelAdapter {
   }
 }
 
+/** 把 `default` 或空模型名统一成真正会发送给 Codex 的默认模型。 */
 function normalizeModel(model: string): string {
   const trimmed = model.trim();
   return trimmed && trimmed !== "default" ? trimmed : DEFAULT_CODEX_MODEL;
 }
 
+/** 把 pi-ai 返回的 assistant message 压成纯文本，供 JSON 解析器处理。 */
 function assistantText(message: AssistantMessage): string {
   return message.content
     .filter((content) => content.type === "text")
@@ -228,6 +249,7 @@ function assistantText(message: AssistantMessage): string {
     .join("");
 }
 
+/** 在桌面上打开 OAuth 浏览器登录页。 */
 function openBrowser(url: string): void {
   const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
   const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
@@ -238,6 +260,7 @@ function openBrowser(url: string): void {
   child.unref();
 }
 
+/** 把异常统一转成日志字符串。 */
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

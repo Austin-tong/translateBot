@@ -1,3 +1,4 @@
+/** 单个本机模型服务在 popup/setup 里的状态快照。 */
 export interface LocalProviderStatus {
   provider: "ollama" | "lmstudio";
   baseUrl: string;
@@ -8,6 +9,7 @@ export interface LocalProviderStatus {
   detail: string;
 }
 
+/** proxy `/setup/status` 返回给 popup 的整体状态。 */
 export interface SetupStatus {
   mode: "local-first";
   configPath: string;
@@ -21,6 +23,7 @@ export interface SetupStatus {
   nextMessage: string;
 }
 
+/** 读取 proxy 的 setup 状态，并在超时时给 popup 一个可恢复错误。 */
 export async function fetchSetupStatus(proxyUrl: string, timeoutMs = 1500): Promise<SetupStatus> {
   const baseUrl = proxyUrl.replace(/\/$/, "");
   const controller = new AbortController();

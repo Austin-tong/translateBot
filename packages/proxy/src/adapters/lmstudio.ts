@@ -10,9 +10,14 @@ interface ChatCompletionResponse {
   usage?: unknown;
 }
 
+/**
+ * LM Studio 适配器。
+ * 走 OpenAI-compatible Chat Completions，因此只需要拼请求、校验返回、解析 JSON。
+ */
 export class LMStudioAdapter implements ModelAdapter {
   constructor(private readonly config: ProxyConfig) {}
 
+  /** 从本机 LM Studio 的 /models 端点读取可选模型。 */
   async listModels(): Promise<string[]> {
     const response = await fetchWithTimeout(`${this.baseUrl()}/models`, {
       signalTimeoutMs: this.config.requestTimeoutMs
@@ -24,6 +29,7 @@ export class LMStudioAdapter implements ModelAdapter {
     return (json.data ?? []).map((model) => model.id).filter((id): id is string => Boolean(id));
   }
 
+  /** 调用 LM Studio 的 chat/completions 接口翻译网页片段。 */
   async translate(request: TranslateRequest): Promise<TranslateResponse> {
     const model = request.model ?? this.config.lmstudioModel;
     const expectedIds = new Set(request.segments.map((segment) => segment.id));
@@ -67,12 +73,14 @@ export class LMStudioAdapter implements ModelAdapter {
     };
   }
 
+  /** 去掉尾部斜杠，保证拼接 URL 时不会出现双斜杠。 */
   private baseUrl(): string {
     return this.config.lmstudioBaseUrl.replace(/\/$/, "");
   }
 }
 
 // LM Studio 本地服务可能未启动或模型加载较慢，超时后让页面显示可恢复错误。
+/** 带超时的 fetch 包装，避免本地模型卡住时挂死整个翻译流程。 */
 async function fetchWithTimeout(url: string, init: RequestInit & { signalTimeoutMs: number }): Promise<Response> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), init.signalTimeoutMs);

@@ -45,6 +45,7 @@ interface StoredTranslationCache {
   entries: Record<string, StoredTranslationCacheEntry>;
 }
 
+/** content script 记录的翻译块：原文、译文、DOM 节点和当前状态都挂在这里。 */
 export interface SegmentRecord {
   id: string;
   text: string;
@@ -71,6 +72,30 @@ interface ViewportAnchor {
   topOffsetFromCenter: number;
 }
 
+export function hasDuplicateTextBlockConflict(
+  element: HTMLElement,
+  hash: string,
+  records: Iterable<SegmentRecord>,
+  currentRecordId?: string
+): boolean {
+  // 同一语义块可能在不同层级被发现两次，例如外层标题和内层 Draft 容器。
+  // 只要文本 hash 一样，并且 DOM 上有祖先/后代/同级重叠，就视为同一块，避免重复翻译。
+  for (const record of records) {
+    if (record.hash !== hash) continue;
+    if (!record.element.isConnected) continue;
+    if (currentRecordId && record.id === currentRecordId) continue;
+    if (record.element === element) return true;
+    if (record.element.parentElement === element.parentElement) return true;
+    if (record.element.contains(element) || element.contains(record.element)) return true;
+  }
+
+  return false;
+}
+
+/**
+ * 页面内翻译运行时。
+ * 负责发现候选文本、排队翻译、缓存结果，以及在内容变更时把旧记录恢复或重译。
+ */
 export class TranslationRuntime {
   private enabled = false;
   private settings?: ExtensionSettings;
@@ -236,6 +261,14 @@ export class TranslationRuntime {
     if (!this.enabled || element.hasAttribute(RECORD_ATTR)) return;
     const text = getSourceText(element);
     if (!isTranslatableText(text)) return;
+    const hash = cacheKeyForText(text);
+    if (this.isDuplicateSiblingCandidate(element, hash)) {
+      logDebug("duplicate candidate skipped", {
+        element: describeElement(element),
+        text: previewText(text)
+      });
+      return;
+    }
 
     const record = createRecord(element, `tb-${++this.sequence}`, text);
     record.onRefresh = () => {
@@ -243,12 +276,12 @@ export class TranslationRuntime {
     };
     this.records.set(record.id, record);
 
-    const cached = this.cache.get(record.hash);
+    const cached = this.cache.get(hash);
     if (cached) {
       mutatePreservingViewportCenter(() => applyTranslation(record, cached));
       record.status = "done";
       this.translated += 1;
-      this.touchCache(record.hash);
+      this.touchCache(hash);
       logDebug("record cache hit", recordLogPayload(record));
       return;
     }
@@ -260,6 +293,10 @@ export class TranslationRuntime {
       logDebug("record observed", recordLogPayload(record));
       this.intersectionObserver?.observe(record.element);
     }
+  }
+
+  private isDuplicateSiblingCandidate(element: HTMLElement, hash: string, currentRecordId?: string): boolean {
+    return hasDuplicateTextBlockConflict(element, hash, this.records.values(), currentRecordId);
   }
 
   private refreshNearestRecord(element: Element): boolean {
@@ -281,6 +318,13 @@ export class TranslationRuntime {
 
     record.text = text;
     record.hash = hash;
+    if (this.isDuplicateSiblingCandidate(record.element, hash, record.id)) {
+      this.queue = this.queue.filter((queuedId) => queuedId !== record.id);
+      this.intersectionObserver?.unobserve(record.element);
+      mutatePreservingViewportCenter(() => restoreRecord(record));
+      this.records.delete(record.id);
+      return true;
+    }
     record.status = "pending";
     mutatePreservingViewportCenter(() => {
       record.translationElement?.remove();
@@ -547,6 +591,10 @@ export class TranslationRuntime {
   }
 }
 
+/**
+ * 在给定 root 下收集“值得翻译”的候选块。
+ * 输入是一个 DOM 子树，输出是去重后的 HTMLElement 列表，保证只保留最深层、最适合做翻译的容器。
+ */
 export function collectCandidateElements(root: Element): HTMLElement[] {
   const raw: HTMLElement[] = [];
   const maybeRoot = root instanceof HTMLElement ? root : undefined;
@@ -567,6 +615,7 @@ export function collectCandidateElements(root: Element): HTMLElement[] {
   return raw.filter((candidate) => !raw.some((other) => other !== candidate && candidate.contains(other)));
 }
 
+/** 判断一个元素本身是不是可翻译候选，不负责做子树遍历。 */
 export function isCandidateElement(element: HTMLElement): boolean {
   return evaluateCandidateElement(element).ok;
 }
@@ -576,6 +625,7 @@ function evaluateCandidateElement(element: HTMLElement): CandidateDecision {
   const recordAncestor = element.closest(`[${RECORD_ATTR}]`);
   if (recordAncestor && recordAncestor !== element) return { ok: false, reason: "inside-record", text: "" };
   if (shouldSkipElement(element)) return { ok: false, reason: "skip-element", text: getSourceTextForLog(element) };
+  if (isChineseLanguageElement(element)) return { ok: false, reason: "non-target-language", text: getSourceTextForLog(element) };
   const text = getSourceText(element);
   if (!isTranslatableText(text)) return { ok: false, reason: "not-translatable", text };
   if (isUiLabelElement(element, text)) return { ok: true, reason: "ui-label", text };
@@ -586,10 +636,11 @@ function evaluateCandidateElement(element: HTMLElement): CandidateDecision {
   if (element.querySelector(INTERACTIVE_DESCENDANT_SELECTOR)) return { ok: false, reason: "interactive-descendant", text };
   if (isLikelyTextRoot(element, text)) return { ok: true, reason: "text-root", text };
   if (text.length < 25) return { ok: false, reason: "short-generic", text };
-  if ([...element.children].some((child) => STRUCTURAL_CHILD_TAGS.has(child.tagName))) return { ok: false, reason: "structural-child", text };
+  if ([...element.children].some((child) => isBlockingStructuralChild(child as HTMLElement))) return { ok: false, reason: "structural-child", text };
   return { ok: true, reason: "generic", text };
 }
 
+/** 只做粗筛：判断一段文本是否值得交给翻译模型处理。 */
 export function isTranslatableText(text: string): boolean {
   if (!text || text.length < 2) return false;
   if (/^[\d\s.,:;!?()[\]{}'"`~@#$%^&*_+=|/\\-]+$/.test(text)) return false;
@@ -601,6 +652,7 @@ export function isTranslatableText(text: string): boolean {
   return !(cjk / Math.max(text.length, 1) > 0.55 && latin / Math.max(text.length, 1) < 0.08);
 }
 
+/** 把一个 DOM 元素包装成可追踪的翻译记录，并写上数据属性用于后续恢复。 */
 export function createRecord(element: HTMLElement, id: string, text = getSourceText(element)): SegmentRecord {
   element.setAttribute(RECORD_ATTR, id);
   return {
@@ -613,11 +665,13 @@ export function createRecord(element: HTMLElement, id: string, text = getSourceT
   };
 }
 
+/** 关闭翻译后恢复原始 DOM 结构，并清掉记录标记。 */
 export function restoreRecord(record: SegmentRecord): void {
   record.translationElement?.remove();
   record.element.removeAttribute(RECORD_ATTR);
 }
 
+/** 把翻译文本写回页面，同时按块类型决定是 block 还是 inline 展示。 */
 export function applyTranslation(record: SegmentRecord, translation: string): void {
   const translationElement = prepareTranslationElement(record);
   translationElement.setAttribute(TRANSLATION_STATE_ATTR, "done");
@@ -629,6 +683,7 @@ export function applyTranslation(record: SegmentRecord, translation: string): vo
   translationElement.replaceChildren(...nodes);
 }
 
+/** 在目标块里显示“翻译中”占位，避免用户误以为页面卡住。 */
 export function applyLoading(record: SegmentRecord): void {
   const translationElement = prepareTranslationElement(record);
   translationElement.setAttribute(TRANSLATION_STATE_ATTR, "loading");
@@ -782,6 +837,13 @@ function shouldSkipElement(element: Element): boolean {
   return style.display === "none" || style.visibility === "hidden";
 }
 
+function isChineseLanguageElement(element: Element): boolean {
+  const languageElement = element.closest("[lang]");
+  const lang = languageElement?.getAttribute("lang")?.trim().toLowerCase().replace(/_/g, "-");
+  if (!lang) return false;
+  return lang.startsWith("zh");
+}
+
 function isPotentialUiLabelElement(element: Element): boolean {
   return UI_LABEL_TAGS.has(element.tagName) && Boolean(element.closest(UI_LABEL_ANCESTOR_SELECTOR));
 }
@@ -807,6 +869,21 @@ function isLikelyTextRoot(element: HTMLElement, text: string): boolean {
 
 function hasOnlyInlineTextDescendants(element: Element): boolean {
   return [...element.children].every((child) => INLINE_TEXT_CHILD_TAGS.has(child.tagName) && hasOnlyInlineTextDescendants(child));
+}
+
+function isBlockingStructuralChild(element: HTMLElement): boolean {
+  if (!STRUCTURAL_CHILD_TAGS.has(element.tagName)) return false;
+  if (element.tagName !== "DIV") return true;
+  return !isInlineTextWrapper(element);
+}
+
+function isInlineTextWrapper(element: HTMLElement): boolean {
+  if (shouldSkipElement(element)) return false;
+  return [...element.children].every((child) => {
+    if (INLINE_TEXT_CHILD_TAGS.has(child.tagName)) return hasOnlyInlineTextDescendants(child);
+    if (child.tagName === "DIV") return isInlineTextWrapper(child as HTMLElement);
+    return false;
+  });
 }
 
 function hasMention(text: string): boolean {

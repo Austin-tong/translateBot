@@ -16,6 +16,10 @@ const assistantChecklist = document.querySelector<HTMLUListElement>("#assistantC
 
 void init();
 
+/**
+ * popup 的启动入口。
+ * 按“读设置 -> 渲染表单 -> 绑定事件 -> 刷新 setup 和当前页状态”的顺序初始化界面。
+ */
 async function init(): Promise<void> {
   const settings = await getSettings();
   setForm(settings);
@@ -59,6 +63,7 @@ async function init(): Promise<void> {
   void refreshActiveTabStatus();
 }
 
+/** 请求 proxy 的 setup 状态并渲染顶部助手区域。 */
 async function refreshSetupAssistant(proxy: string): Promise<void> {
   try {
     const setupStatus = await fetchSetupStatus(proxy);
@@ -68,6 +73,7 @@ async function refreshSetupAssistant(proxy: string): Promise<void> {
   }
 }
 
+/** 保存当前表单，并把新设置同步给当前标签页。 */
 async function saveCurrentForm(): Promise<void> {
   const settings = readForm();
   await saveSettings(settings);
@@ -77,11 +83,13 @@ async function saveCurrentForm(): Promise<void> {
   setStatus(`Saved. Provider: ${saved.provider}. Model: ${saved.model ?? "default"}.${formatUpdateStatus(update)}`);
 }
 
+/** 读取当前 tab 的翻译状态，更新 popup 底部状态栏。 */
 async function refreshActiveTabStatus(): Promise<void> {
   const pageStatus = await getActiveTabStatus();
   setPageStatus(pageStatus);
 }
 
+/** 在 proxy 上启动 OpenAI Codex 的 OAuth 登录流程。 */
 async function startCodexLogin(): Promise<void> {
   const settings = readForm();
   await saveSettings(settings);
@@ -95,6 +103,7 @@ async function startCodexLogin(): Promise<void> {
   }
 }
 
+/** 保存表单后切换当前标签页的翻译开关。 */
 async function saveAndToggle(): Promise<void> {
   const settings = readForm();
   await saveSettings(settings);
@@ -109,6 +118,7 @@ async function saveAndToggle(): Promise<void> {
   setPageStatus(result.status);
 }
 
+/** 手动刷新 proxy 的健康状态，方便排查本机模型服务是否已启动。 */
 async function checkProxy(): Promise<void> {
   const settings = readForm();
   await saveSettings(settings);
@@ -125,6 +135,7 @@ async function checkProxy(): Promise<void> {
   }
 }
 
+/** 向 proxy 查询 OpenAI Codex OAuth 的登录态。 */
 async function fetchOpenAIAuthDetail(proxy: string): Promise<string> {
   try {
     const response = await fetch(`${proxy}/auth/openai/status`);
@@ -137,6 +148,7 @@ async function fetchOpenAIAuthDetail(proxy: string): Promise<string> {
   }
 }
 
+/** popup 保存设置后，通过 background 通知当前标签页更新翻译参数。 */
 async function notifySettingsChanged(settings: ExtensionSettings): Promise<StatusResponse | undefined> {
   try {
     const response = await chrome.runtime.sendMessage<BackgroundMessage, ToggleResponse>({
@@ -151,6 +163,7 @@ async function notifySettingsChanged(settings: ExtensionSettings): Promise<Statu
   }
 }
 
+/** 查询当前标签页的翻译运行状态，超时后直接回退为空。 */
 async function getActiveTabStatus(): Promise<StatusResponse | undefined> {
   try {
     return await withTimeout(chrome.runtime.sendMessage<BackgroundMessage, StatusResponse | undefined>({ type: "GET_TAB_STATUS" }), 800);
@@ -159,6 +172,7 @@ async function getActiveTabStatus(): Promise<StatusResponse | undefined> {
   }
 }
 
+/** 触发当前标签页的翻译切换，并把错误收敛成可展示消息。 */
 async function sendToggleMessage(settings: ExtensionSettings): Promise<ToggleResponse | undefined> {
   try {
     return await chrome.runtime.sendMessage<BackgroundMessage, ToggleResponse>({
@@ -170,6 +184,7 @@ async function sendToggleMessage(settings: ExtensionSettings): Promise<ToggleRes
   }
 }
 
+/** 给异步操作加上前端超时，避免 popup 一直挂起。 */
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = window.setTimeout(() => {
@@ -188,12 +203,14 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   });
 }
 
+/** 把设置对象写回表单控件。 */
 function setForm(settings: ExtensionSettings): void {
   if (provider) provider.value = settings.provider;
   if (model) model.value = settings.model ?? "";
   if (proxyUrl) proxyUrl.value = settings.proxyUrl;
 }
 
+/** 从表单读取当前设置，并把空值收敛成默认配置。 */
 function readForm(): ExtensionSettings {
   const rawProvider = provider?.value;
   return {
@@ -203,10 +220,12 @@ function readForm(): ExtensionSettings {
   };
 }
 
+/** 更新 popup 底部状态栏文案。 */
 function setStatus(message: string): void {
   if (status) status.textContent = message;
 }
 
+/** 渲染顶部的 setup 助手区域，并替换占位符中的 proxyUrl。 */
 function renderSetupAssistant(state: PopupSetupState, proxyUrl: string): void {
   if (assistantTitle) assistantTitle.textContent = state.assistantTitle;
   if (assistantSummary) assistantSummary.textContent = formatAssistantText(state.assistantSummary, proxyUrl);
@@ -223,6 +242,7 @@ function renderSetupAssistant(state: PopupSetupState, proxyUrl: string): void {
   updateLoginVisibility();
 }
 
+/** 把当前页翻译状态收敛成一句可读摘要。 */
 function setPageStatus(pageStatus: StatusResponse | undefined): void {
   if (!pageStatus?.enabled) {
     setStatus("Current page: translation is off.");
@@ -236,6 +256,7 @@ function setPageStatus(pageStatus: StatusResponse | undefined): void {
   if (toggle) toggle.textContent = "Turn off";
 }
 
+/** 切换 provider 时清理明显不匹配的模型名，避免把 OpenAI 模型发给本地引擎。 */
 function clearIncompatibleModelForProvider(): void {
   if (!provider || !model) return;
   const currentModel = model.value.trim();
@@ -243,20 +264,24 @@ function clearIncompatibleModelForProvider(): void {
   if (provider.value === "openai" && /^(gemma|qwen|llama|mistral|deepseek)/i.test(currentModel)) model.value = "";
 }
 
+/** 只有 OpenAI provider 才显示登录按钮。 */
 function updateLoginVisibility(): void {
   if (!login) return;
   login.hidden = provider?.value !== "openai";
 }
 
+/** 把模板里的 proxy 占位符替换成真实地址。 */
 function formatAssistantText(text: string, proxyUrl: string): string {
   return text.replaceAll("{{proxyUrl}}", proxyUrl);
 }
 
+/** 把翻译开关的结果补到已保存状态后面，方便用户知道当前页是否已启用。 */
 function formatUpdateStatus(statusResponse: StatusResponse | undefined): string {
   if (!statusResponse?.enabled) return " Active page: translation is off.";
   return ` Active page: translation is on with ${statusResponse.provider ?? "unknown"} / ${statusResponse.model ?? "default"}.`;
 }
 
+/** 日志里只保留关键设置字段。 */
 function settingsLogPayload(settings: ExtensionSettings): Record<string, string> {
   return {
     provider: settings.provider,
@@ -265,6 +290,7 @@ function settingsLogPayload(settings: ExtensionSettings): Record<string, string>
   };
 }
 
+/** 把异常转成可展示的文案。 */
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

@@ -1,6 +1,7 @@
 import type { BackgroundMessage, StatusResponse, ToggleResponse } from "./messages.js";
 import { getSettings } from "./settings.js";
 
+// background 只负责把浏览器命令、toolbar 点击和 popup 消息转发给当前标签页。
 chrome.commands.onCommand.addListener((command) => {
   if (command === "toggle-translation") {
     void toggleCurrentTab();
@@ -32,6 +33,7 @@ chrome.runtime.onMessage.addListener((message: BackgroundMessage, _sender, sendR
   return false;
 });
 
+/** 根据当前活动标签页切换翻译状态，必要时先注入 content script。 */
 async function toggleCurrentTab(overrideSettings?: Awaited<ReturnType<typeof getSettings>>): Promise<ToggleResponse> {
   const tab = await getActiveTab();
   if (!tab?.id || !tab.url || !isSupportedUrl(tab.url)) {
@@ -45,6 +47,7 @@ async function toggleCurrentTab(overrideSettings?: Awaited<ReturnType<typeof get
   return { ok: true, status };
 }
 
+/** 把 popup 保存的新设置同步给当前标签页的 content script。 */
 async function updateCurrentTabSettings(settings: Awaited<ReturnType<typeof getSettings>>): Promise<{ ok: boolean; error?: string; status?: StatusResponse }> {
   const tab = await getActiveTab();
   if (!tab?.id || !tab.url || !isSupportedUrl(tab.url)) {
@@ -62,11 +65,13 @@ async function updateCurrentTabSettings(settings: Awaited<ReturnType<typeof getS
   }
 }
 
+/** 读取当前窗口的活动标签页。 */
 async function getActiveTab(): Promise<chrome.tabs.Tab | undefined> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab;
 }
 
+/** 查询当前活动标签页的翻译运行状态。 */
 async function getCurrentTabStatus(): Promise<StatusResponse | undefined> {
   const tab = await getActiveTab();
   if (!tab?.id || !tab.url || !isSupportedUrl(tab.url)) return undefined;
@@ -78,6 +83,7 @@ async function getCurrentTabStatus(): Promise<StatusResponse | undefined> {
   }
 }
 
+/** 确保目标标签页里已经有 content script；没有就动态注入。 */
 async function ensureContentScript(tabId: number): Promise<void> {
   try {
     await sendTabMessage(tabId, { type: "TRANSLATE_STATUS" });
@@ -89,14 +95,17 @@ async function ensureContentScript(tabId: number): Promise<void> {
   }
 }
 
+/** 包一层 chrome.tabs.sendMessage，统一返回值类型。 */
 function sendTabMessage<T>(tabId: number, message: unknown): Promise<T> {
   return chrome.tabs.sendMessage(tabId, message) as Promise<T>;
 }
 
+/** 只允许 http/https 页面接收翻译功能。 */
 function isSupportedUrl(url: string): boolean {
   return url.startsWith("http://") || url.startsWith("https://");
 }
 
+/** 日志里只保留设置的关键字段，避免直接打印整份对象。 */
 function settingsLogPayload(settings: Awaited<ReturnType<typeof getSettings>>): Record<string, string> {
   return {
     provider: settings.provider,
@@ -105,6 +114,7 @@ function settingsLogPayload(settings: Awaited<ReturnType<typeof getSettings>>): 
   };
 }
 
+/** 把任意异常转成 popup 可展示的简短消息。 */
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
