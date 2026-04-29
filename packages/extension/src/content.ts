@@ -11,6 +11,8 @@ const UI_LABEL_ANCESTOR_SELECTOR = "button, nav, [role='button'], [role='navigat
 const UI_LABEL_TAGS = new Set(["SPAN", "A", "BUTTON"]);
 const BLOCK_TRANSLATION_TAGS = new Set(["P", "LI", "DD", "DT", "BLOCKQUOTE", "FIGCAPTION", "SUMMARY", "H1", "H2", "H3", "H4", "H5", "H6"]);
 const CONTAINER_TAGS = new Set(["ARTICLE", "ASIDE", "BODY", "FOOTER", "FORM", "HEADER", "MAIN", "NAV", "OL", "SECTION", "TABLE", "TBODY", "TD", "TH", "THEAD", "TR", "UL"]);
+const PRIMARY_CONTENT_ANCESTOR_SELECTOR = "main, article, [role='main']";
+const UTILITY_SURFACE_ANCESTOR_SELECTOR = "nav, header, aside, footer, [role='navigation'], [role='banner'], [role='contentinfo']";
 const VIEWPORT_ANCHOR_SELECTOR = `[${RECORD_ATTR}], p, li, dd, dt, blockquote, figcaption, summary, h1, h2, h3, h4, h5, h6, div, article, section, span, a, img, video, canvas, [role='img']`;
 const GENERIC_TEXT_CONTAINER_TAGS = new Set(["DIV", "ARTICLE", "SECTION"]);
 const STRUCTURAL_CHILD_TAGS = new Set([...BLOCK_TRANSLATION_TAGS, ...CONTAINER_TAGS, "DIV"]);
@@ -54,6 +56,7 @@ export interface SegmentRecord {
   status: "pending" | "queued" | "translating" | "done" | "error";
   hash: string;
   layout: "block" | "inline";
+  priority: number;
   onRefresh?: () => void;
 }
 
@@ -65,11 +68,17 @@ interface CandidateDecision {
   ok: boolean;
   reason: string;
   text: string;
+  priority?: number;
 }
 
 interface ViewportAnchor {
   element: HTMLElement;
   topOffsetFromCenter: number;
+}
+
+interface CandidateMatch {
+  element: HTMLElement;
+  decision: CandidateDecision;
 }
 
 export function hasDuplicateTextBlockConflict(
@@ -78,14 +87,12 @@ export function hasDuplicateTextBlockConflict(
   records: Iterable<SegmentRecord>,
   currentRecordId?: string
 ): boolean {
-  // 同一语义块可能在不同层级被发现两次，例如外层标题和内层 Draft 容器。
-  // 只要文本 hash 一样，并且 DOM 上有祖先/后代/同级重叠，就视为同一块，避免重复翻译。
+  // “重复翻译”指同一个可见文本块在不同 DOM 层级被重复命中，而不是不同位置的同文案文本。
   for (const record of records) {
     if (record.hash !== hash) continue;
     if (!record.element.isConnected) continue;
     if (currentRecordId && record.id === currentRecordId) continue;
     if (record.element === element) return true;
-    if (record.element.parentElement === element.parentElement) return true;
     if (record.element.contains(element) || element.contains(record.element)) return true;
   }
 
@@ -246,31 +253,38 @@ export class TranslationRuntime {
 
   private discover(root: Element | null): void {
     if (!root || !this.enabled) return;
-    const candidates = collectCandidateElements(root);
+    this.pruneDisconnectedRecords();
+    const candidates = collectCandidateMatches(root);
     if (candidates.length > 0) {
       logDebug("discovery candidates", {
         root: describeElement(root),
         count: candidates.length,
-        candidates: candidates.slice(0, 8).map((element) => describeElement(element))
+        candidates: candidates.slice(0, 8).map((candidate) => describeElement(candidate.element))
       });
     }
-    for (const element of candidates) this.discoverElement(element);
+    for (const candidate of candidates) this.discoverCandidate(candidate);
   }
 
-  private discoverElement(element: HTMLElement): void {
+  private discoverCandidate(candidate: CandidateMatch): void {
+    const { element, decision } = candidate;
     if (!this.enabled || element.hasAttribute(RECORD_ATTR)) return;
-    const text = getSourceText(element);
+    const text = decision.text;
     if (!isTranslatableText(text)) return;
     const hash = cacheKeyForText(text);
-    if (this.isDuplicateSiblingCandidate(element, hash)) {
-      logDebug("duplicate candidate skipped", {
-        element: describeElement(element),
-        text: previewText(text)
-      });
+    const conflictingRecord = this.findConflictingRecord(element, hash);
+    if (conflictingRecord) {
+      if (!candidateShouldReplaceRecord(candidate, conflictingRecord)) {
+        logDebug("duplicate candidate skipped", {
+          element: describeElement(element),
+          text: previewText(text)
+        });
+        return;
+      }
+      this.migrateRecordToCandidate(conflictingRecord, candidate);
       return;
     }
 
-    const record = createRecord(element, `tb-${++this.sequence}`, text);
+    const record = createRecord(element, `tb-${++this.sequence}`, text, decision.priority ?? 0);
     record.onRefresh = () => {
       this.refreshRecord(record.id);
     };
@@ -297,6 +311,47 @@ export class TranslationRuntime {
 
   private isDuplicateSiblingCandidate(element: HTMLElement, hash: string, currentRecordId?: string): boolean {
     return hasDuplicateTextBlockConflict(element, hash, this.records.values(), currentRecordId);
+  }
+
+  private findConflictingRecord(element: HTMLElement, hash: string, currentRecordId?: string): SegmentRecord | undefined {
+    for (const record of this.records.values()) {
+      if (record.hash !== hash) continue;
+      if (!record.element.isConnected) continue;
+      if (currentRecordId && record.id === currentRecordId) continue;
+      if (record.element === element) return record;
+      if (record.element.contains(element) || element.contains(record.element)) return record;
+    }
+    return undefined;
+  }
+
+  private migrateRecordToCandidate(record: SegmentRecord, candidate: CandidateMatch): void {
+    const nextElement = candidate.element;
+    if (record.element === nextElement) return;
+
+    const previousElement = record.element;
+    const translationElement = record.translationElement;
+    previousElement.removeAttribute(RECORD_ATTR);
+    nextElement.setAttribute(RECORD_ATTR, record.id);
+    record.element = nextElement;
+    record.text = candidate.decision.text;
+    record.hash = cacheKeyForText(candidate.decision.text);
+    record.priority = candidate.decision.priority ?? record.priority;
+    record.layout = candidateLayout(nextElement, candidate.decision.text);
+
+    mutatePreservingViewportCenter(() => {
+      if (!translationElement) return;
+      nextElement.append(translationElement);
+      syncTranslationElementStyle(record, translationElement);
+    });
+  }
+
+  private pruneDisconnectedRecords(): void {
+    for (const [id, record] of this.records.entries()) {
+      if (record.element.isConnected) continue;
+      this.queue = this.queue.filter((queuedId) => queuedId !== id);
+      record.translationElement = undefined;
+      this.records.delete(id);
+    }
   }
 
   private refreshNearestRecord(element: Element): boolean {
@@ -390,7 +445,7 @@ export class TranslationRuntime {
     const maxConcurrent = maxConcurrentBatches(this.settings.provider);
     const batchSize = batchSizeForProvider(this.settings.provider);
     while (this.enabled && this.activeBatches < maxConcurrent && this.queue.length > 0) {
-      const ids = this.queue.splice(0, batchSize);
+      const ids = takeNextQueuedIds(this.queue, this.records, batchSize);
       const records = ids.map((id) => this.records.get(id)).filter((record): record is SegmentRecord => Boolean(record));
       for (const record of records) record.status = "translating";
       this.activeBatches += 1;
@@ -596,23 +651,26 @@ export class TranslationRuntime {
  * 输入是一个 DOM 子树，输出是去重后的 HTMLElement 列表，保证只保留最深层、最适合做翻译的容器。
  */
 export function collectCandidateElements(root: Element): HTMLElement[] {
-  const raw: HTMLElement[] = [];
+  return collectCandidateMatches(root).map((match) => match.element);
+}
+
+function collectCandidateMatches(root: Element): CandidateMatch[] {
+  const raw: CandidateMatch[] = [];
   const maybeRoot = root instanceof HTMLElement ? root : undefined;
   if (maybeRoot) {
     const decision = evaluateCandidateElement(maybeRoot);
-    if (decision.ok) raw.push(maybeRoot);
+    if (decision.ok) raw.push({ element: maybeRoot, decision });
     else logMentionSkip(maybeRoot, decision);
   }
 
   const elements = root.querySelectorAll<HTMLElement>("p, li, dd, dt, blockquote, figcaption, summary, h1, h2, h3, h4, h5, h6, div, article, section, span, a, button");
   for (const element of elements) {
     const decision = evaluateCandidateElement(element);
-    if (decision.ok) raw.push(element);
+    if (decision.ok) raw.push({ element, decision });
     else logMentionSkip(element, decision);
   }
 
-  // 保留最深的文本容器，避免把整张卡片和内部段落重复翻译。
-  return raw.filter((candidate) => !raw.some((other) => other !== candidate && candidate.contains(other)));
+  return resolveCandidateMatches(raw);
 }
 
 /** 判断一个元素本身是不是可翻译候选，不负责做子树遍历。 */
@@ -623,21 +681,119 @@ export function isCandidateElement(element: HTMLElement): boolean {
 function evaluateCandidateElement(element: HTMLElement): CandidateDecision {
   if (element.hasAttribute(RECORD_ATTR) || element.closest(`[${TRANSLATION_ATTR}]`)) return { ok: false, reason: "already-translated", text: "" };
   const recordAncestor = element.closest(`[${RECORD_ATTR}]`);
-  if (recordAncestor && recordAncestor !== element) return { ok: false, reason: "inside-record", text: "" };
   if (shouldSkipElement(element)) return { ok: false, reason: "skip-element", text: getSourceTextForLog(element) };
   if (isChineseLanguageElement(element)) return { ok: false, reason: "non-target-language", text: getSourceTextForLog(element) };
   const text = getSourceText(element);
+  if (recordAncestor && recordAncestor !== element && !canEscapeRecordAncestor(element, text)) return { ok: false, reason: "inside-record", text: "" };
   if (!isTranslatableText(text)) return { ok: false, reason: "not-translatable", text };
-  if (isUiLabelElement(element, text)) return { ok: true, reason: "ui-label", text };
+  if (isExplicitRichTextRoot(element)) return { ok: true, reason: "explicit-rich-text-root", text, priority: 400 };
+  if (isUiLabelElement(element, text)) return { ok: true, reason: "ui-label", text, priority: 200 };
   if (element.closest(UI_LABEL_ANCESTOR_SELECTOR)) return { ok: false, reason: "ui-label-ancestor", text };
-  if (BLOCK_TRANSLATION_TAGS.has(element.tagName)) return { ok: true, reason: "block", text };
+  if (BLOCK_TRANSLATION_TAGS.has(element.tagName)) return { ok: true, reason: "block", text, priority: 300 };
   if (!GENERIC_TEXT_CONTAINER_TAGS.has(element.tagName)) return { ok: false, reason: "unsupported-tag", text };
   if (CONTAINER_TAGS.has(element.tagName) && element.tagName !== "ARTICLE" && element.tagName !== "SECTION") return { ok: false, reason: "structural-container", text };
   if (element.querySelector(INTERACTIVE_DESCENDANT_SELECTOR)) return { ok: false, reason: "interactive-descendant", text };
-  if (isLikelyTextRoot(element, text)) return { ok: true, reason: "text-root", text };
+  if (isLikelyTextRoot(element, text)) return { ok: true, reason: "text-root", text, priority: 250 };
   if (text.length < 25) return { ok: false, reason: "short-generic", text };
   if ([...element.children].some((child) => isBlockingStructuralChild(child as HTMLElement))) return { ok: false, reason: "structural-child", text };
-  return { ok: true, reason: "generic", text };
+  return { ok: true, reason: "generic", text, priority: 100 };
+}
+
+function resolveCandidateMatches(matches: CandidateMatch[]): CandidateMatch[] {
+  const kept: CandidateMatch[] = [];
+  const sorted = [...matches].sort((left, right) => compareCandidateMatches(left, right));
+
+  for (const candidate of sorted) {
+    if (kept.some((existing) => candidatesConflict(candidate, existing))) continue;
+    kept.push(candidate);
+  }
+
+  return kept.sort(compareDomOrder);
+}
+
+function compareCandidateMatches(left: CandidateMatch, right: CandidateMatch): number {
+  const priorityDelta = (right.decision.priority ?? 0) - (left.decision.priority ?? 0);
+  if (priorityDelta !== 0) return priorityDelta;
+  const depthDelta = elementDepth(right.element) - elementDepth(left.element);
+  if (depthDelta !== 0) return depthDelta;
+  return compareDomOrder(left, right);
+}
+
+function candidatesConflict(left: CandidateMatch, right: CandidateMatch): boolean {
+  if (left.element === right.element) return true;
+  const overlaps = left.element.contains(right.element) || right.element.contains(left.element);
+  if (!overlaps) return false;
+  return left.decision.text === right.decision.text;
+}
+
+function candidateShouldReplaceRecord(candidate: CandidateMatch, record: SegmentRecord): boolean {
+  if ((candidate.decision.priority ?? 0) !== record.priority) return (candidate.decision.priority ?? 0) > record.priority;
+  return elementDepth(candidate.element) > elementDepth(record.element);
+}
+
+function compareDomOrder(left: CandidateMatch, right: CandidateMatch): number {
+  return compareElementDomOrder(left.element, right.element);
+}
+
+function compareElementDomOrder(left: Element, right: Element): number {
+  if (left === right) return 0;
+  const position = left.compareDocumentPosition(right);
+  if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+  if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+  return 0;
+}
+
+function elementDepth(element: Element): number {
+  let depth = 0;
+  let current: Element | null = element;
+  while (current?.parentElement) {
+    depth += 1;
+    current = current.parentElement;
+  }
+  return depth;
+}
+
+/**
+ * 从待翻译队列里挑出“这一批最该先发”的记录。
+ * 复杂页面里常见导航、工具栏、正文同时入队；这里优先正文主块，避免标题和首段被外围按钮挤到后批次。
+ */
+function takeNextQueuedIds(queue: string[], records: Map<string, SegmentRecord>, batchSize: number): string[] {
+  const sorted = [...queue].sort((leftId, rightId) => {
+    const left = records.get(leftId);
+    const right = records.get(rightId);
+    if (!left && !right) return 0;
+    if (!left) return 1;
+    if (!right) return -1;
+    return compareQueuedRecordPriority(left, right);
+  });
+  const ids = sorted.slice(0, batchSize);
+  const selected = new Set(ids);
+  queue.splice(0, queue.length, ...queue.filter((queuedId) => !selected.has(queuedId)));
+  return ids;
+}
+
+/** 比较两个已入队记录的发送先后顺序，分高者先发送。 */
+function compareQueuedRecordPriority(left: SegmentRecord, right: SegmentRecord): number {
+  const scoreDelta = queuedRecordPriority(right) - queuedRecordPriority(left);
+  if (scoreDelta !== 0) return scoreDelta;
+  return compareElementDomOrder(left.element, right.element);
+}
+
+/**
+ * 统一计算“这条记录有多值得先翻译”。
+ * 规则只依赖通用页面语义：
+ * - main/article 内的块级正文更重要；
+ * - nav/header/aside/footer 内的短标签更靠后；
+ * - 标题和段落优先于普通内联标签。
+ */
+function queuedRecordPriority(record: SegmentRecord): number {
+  let score = record.priority;
+  if (record.layout === "block") score += 40;
+  if (record.element.closest(PRIMARY_CONTENT_ANCESTOR_SELECTOR)) score += 120;
+  if (record.element.closest(UTILITY_SURFACE_ANCESTOR_SELECTOR)) score -= 120;
+  if (/^H[1-6]$/.test(record.element.tagName)) score += 80;
+  if (record.element.tagName === "P") score += 60;
+  return score;
 }
 
 /** 只做粗筛：判断一段文本是否值得交给翻译模型处理。 */
@@ -653,7 +809,7 @@ export function isTranslatableText(text: string): boolean {
 }
 
 /** 把一个 DOM 元素包装成可追踪的翻译记录，并写上数据属性用于后续恢复。 */
-export function createRecord(element: HTMLElement, id: string, text = getSourceText(element)): SegmentRecord {
+export function createRecord(element: HTMLElement, id: string, text = getSourceText(element), priority = 0): SegmentRecord {
   element.setAttribute(RECORD_ATTR, id);
   return {
     id,
@@ -661,8 +817,19 @@ export function createRecord(element: HTMLElement, id: string, text = getSourceT
     element,
     status: "pending",
     hash: cacheKeyForText(text),
-    layout: isUiLabelElement(element, text) ? "inline" : "block"
+    layout: candidateLayout(element, text),
+    priority
   };
+}
+
+function candidateLayout(element: HTMLElement, text: string): "block" | "inline" {
+  return isUiLabelElement(element, text) ? "inline" : "block";
+}
+
+function canEscapeRecordAncestor(element: HTMLElement, text: string): boolean {
+  if (isExplicitRichTextRoot(element)) return true;
+  if (BLOCK_TRANSLATION_TAGS.has(element.tagName)) return true;
+  return isLikelyTextRoot(element, text);
 }
 
 /** 关闭翻译后恢复原始 DOM 结构，并清掉记录标记。 */
@@ -710,6 +877,13 @@ function prepareTranslationElement(record: SegmentRecord): HTMLSpanElement {
   translationElement.setAttribute(TRANSLATION_ATTR, "true");
   if (record.status !== "queued" && record.status !== "translating") translationElement.removeAttribute("aria-label");
   translationElement.hidden = false;
+  syncTranslationElementStyle(record, translationElement);
+  if (!record.translationElement) record.element.append(translationElement);
+  record.translationElement = translationElement;
+  return translationElement;
+}
+
+function syncTranslationElementStyle(record: SegmentRecord, translationElement: HTMLSpanElement): void {
   copyTextStyle(record.element, translationElement);
   if (record.layout === "inline") {
     translationElement.style.display = "inline";
@@ -724,9 +898,6 @@ function prepareTranslationElement(record: SegmentRecord): HTMLSpanElement {
   }
   translationElement.style.overflowWrap = "break-word";
   translationElement.style.setProperty("overflow-anchor", "none");
-  if (!record.translationElement) record.element.append(translationElement);
-  record.translationElement = translationElement;
-  return translationElement;
 }
 
 function createRefreshButton(record: SegmentRecord): HTMLButtonElement | undefined {
@@ -858,9 +1029,12 @@ function isUiLabelElement(element: HTMLElement, text = getSourceText(element)): 
   return true;
 }
 
-function isLikelyTextRoot(element: HTMLElement, text: string): boolean {
-  // X 的推文正文通常标记为 data-testid="tweetText"；优先把它作为整段处理，避免只看到 @handle。
+function isExplicitRichTextRoot(element: HTMLElement): boolean {
   if (element.dataset.testid === "tweetText") return true;
+  return element.classList.contains("public-DraftStyleDefault-block");
+}
+
+function isLikelyTextRoot(element: HTMLElement, text: string): boolean {
   const hasTextDirection = element.getAttribute("dir") === "auto" || element.hasAttribute("lang");
   // 其他站点没有 testid 时，只放行“有语言/方向标记 + @mention + 真实英文词”的纯内联正文容器。
   if (hasTextDirection && hasMention(text) && hasEnoughWordsAroundMention(text) && hasOnlyInlineTextDescendants(element)) return true;

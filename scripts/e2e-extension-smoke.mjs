@@ -7,6 +7,7 @@ import { chromium } from "playwright-core";
 const root = resolve(import.meta.dirname, "..");
 const extensionPath = resolve(root, "packages/extension/dist");
 const chromeExecutablePath = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const proxyPort = Number(process.env.PROXY_PORT ?? "0");
 
 const proxy = await startServer((request, response) => {
   response.setHeader("Access-Control-Allow-Origin", "*");
@@ -33,7 +34,7 @@ const proxy = await startServer((request, response) => {
     return;
   }
   response.writeHead(404).end();
-}, 8787);
+}, proxyPort);
 
 const fixture = await startServer((_request, response) => {
   response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
@@ -62,7 +63,7 @@ try {
 
   const page = await context.newPage();
   await page.goto(fixture.url);
-  const extensionId = await findExtensionId(userDataDir, extensionPath).catch((error) => {
+  const extensionId = await findExtensionId(context, userDataDir, extensionPath).catch((error) => {
     console.warn(`extension smoke test skipped: ${error instanceof Error ? error.message : String(error)}`);
     return undefined;
   });
@@ -80,10 +81,10 @@ try {
       type: "TRANSLATE_TOGGLE",
       settings: {
         provider: "openai",
-        proxyUrl: "http://127.0.0.1:8787"
+        proxyUrl
       }
     });
-  }, { fixtureUrl: fixture.url });
+  }, { fixtureUrl: fixture.url, proxyUrl: proxy.url });
   await extensionPage.close();
   await page.getByText("译文：Fast contextual translation").waitFor({ timeout: 10_000 });
   await page.getByText("Fast contextual translation").waitFor({ timeout: 10_000 });
@@ -113,7 +114,27 @@ async function startServer(handler, preferredPort = 0) {
   };
 }
 
-async function findExtensionId(userDataDir, expectedPath) {
+async function findExtensionId(context, userDataDir, expectedPath) {
+  const fromServiceWorker = await findExtensionIdFromServiceWorker(context);
+  if (fromServiceWorker) return fromServiceWorker;
+  return findExtensionIdFromPreferences(userDataDir, expectedPath);
+}
+
+async function findExtensionIdFromServiceWorker(context) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const worker = context.serviceWorkers().find((item) => item.url().startsWith("chrome-extension://"));
+    if (worker) return new URL(worker.url()).host;
+    try {
+      const nextWorker = await context.waitForEvent("serviceworker", { timeout: 500 });
+      if (nextWorker.url().startsWith("chrome-extension://")) return new URL(nextWorker.url()).host;
+    } catch {
+      // service worker may still be starting up.
+    }
+  }
+  return undefined;
+}
+
+async function findExtensionIdFromPreferences(userDataDir, expectedPath) {
   const preferencesPath = join(userDataDir, "Default", "Preferences");
   for (let attempt = 0; attempt < 50; attempt += 1) {
     try {
@@ -128,5 +149,5 @@ async function findExtensionId(userDataDir, expectedPath) {
     }
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
   }
-  throw new Error("Could not determine unpacked extension id from Chrome Preferences.");
+  throw new Error("Could not determine unpacked extension id from service worker or Chrome Preferences.");
 }

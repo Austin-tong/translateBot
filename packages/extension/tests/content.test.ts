@@ -18,7 +18,7 @@ describe("content translation DOM helpers", () => {
     expect(candidates.map((element) => element.id)).toEqual(["tweetText"]);
   });
 
-  it("keeps exact duplicate sibling blocks from being translated twice", async () => {
+  it("translates exact duplicate sibling blocks independently", async () => {
     vi.useFakeTimers();
     vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
     let runtime: TranslationRuntime | undefined;
@@ -38,9 +38,9 @@ describe("content translation DOM helpers", () => {
       await settleRuntime();
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(document.querySelectorAll("[data-translate-bot-translation]")).toHaveLength(1);
+      expect(document.querySelectorAll("[data-translate-bot-translation]")).toHaveLength(2);
       expect(document.querySelector("#first [data-translate-bot-translation]")).not.toBeNull();
-      expect(document.querySelector("#second [data-translate-bot-translation]")).toBeNull();
+      expect(document.querySelector("#second [data-translate-bot-translation]")).not.toBeNull();
     } finally {
       runtime?.disable();
       vi.useRealTimers();
@@ -149,6 +149,19 @@ describe("content translation DOM helpers", () => {
     expect(translation.textContent).toBe("首页");
     expect(translation.style.display).toBe("inline");
     expect(translation.style.marginLeft).toBe("0.35em");
+  });
+
+  it("keeps repeated ui labels in separate controls as separate candidates", () => {
+    document.body.innerHTML = `
+      <nav>
+        <button><span id="follow-a">Follow</span></button>
+        <button><span id="follow-b">Follow</span></button>
+      </nav>
+    `;
+
+    const candidates = collectCandidateElements(document.body);
+
+    expect(candidates.map((element) => element.id)).toEqual(["follow-a", "follow-b"]);
   });
 
   it("adds a retry button when a translated record can refresh", () => {
@@ -352,6 +365,107 @@ describe("content translation runtime", () => {
     expect(document.querySelectorAll("[data-translate-bot-translation]")).toHaveLength(2);
   });
 
+  it("prioritizes main article title and intro before long navigation lists", async () => {
+    const fetchMock = mockTranslationFetch();
+    const runtime = new TranslationRuntime();
+    const navigationItems = Array.from({ length: 45 }, (_, index) => (
+      `<a class="tool-link" href="/wiki/Nav_${index}"><span>Open tool ${index}</span></a>`
+    )).join("");
+    document.body.innerHTML = `
+      <div class="vector-header-container">
+        <nav aria-label="Site">
+          <div class="tool-strip">${navigationItems}</div>
+        </nav>
+      </div>
+      <div class="mw-content-container">
+        <main id="content" class="mw-body">
+          <header class="mw-body-header vector-page-titlebar no-font-mode-scale">
+            <h1 id="firstHeading" class="firstHeading mw-first-heading">
+              <span lang="en" dir="ltr"><span class="mw-page-title-main">Artificial intelligence</span></span>
+            </h1>
+          </header>
+          <div id="mw-content-text" class="mw-body-content">
+            <p id="intro"><b>Artificial intelligence</b> (AI) is the capability of computational systems to perform tasks typically associated with human intelligence.</p>
+          </div>
+        </main>
+      </div>
+    `;
+
+    await runtime.toggle({ provider: "openai", proxyUrl: "http://proxy.test" });
+    await settleRuntime();
+
+    const firstRequestTexts = requestBody(fetchMock, 0).segments.map((segment) => segment.text);
+    expect(firstRequestTexts).toContain("Artificial intelligence");
+    expect(firstRequestTexts).toContain("Artificial intelligence (AI) is the capability of computational systems to perform tasks typically associated with human intelligence.");
+  });
+
+  it("prioritizes article blocks that become visible before queued utility labels", async () => {
+    const firstFetch = deferred<Response>();
+    const secondFetch = deferred<Response>();
+    const bodies: ProxyRequest[] = [];
+    const fetchMock = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as ProxyRequest;
+      bodies.push(body);
+      return bodies.length === 1 ? firstFetch.promise : secondFetch.promise;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    ControlledIntersectionObserver.reset();
+    vi.stubGlobal("IntersectionObserver", ControlledIntersectionObserver);
+
+    const runtime = new TranslationRuntime();
+    const utilityLabels = Array.from({ length: 80 }, (_, index) => (
+      `<a class="tool-link" href="/wiki/Nav_${index}"><span id="tool-${index}">Open tool ${index}</span></a>`
+    )).join("");
+    document.body.innerHTML = `
+      <div class="vector-header-container">
+        <nav aria-label="Site">
+          <div class="tool-strip">${utilityLabels}</div>
+        </nav>
+      </div>
+      <main id="content" class="mw-body">
+        <header class="mw-body-header vector-page-titlebar no-font-mode-scale">
+          <h1 id="firstHeading" class="firstHeading mw-first-heading">
+            <span lang="en" dir="ltr"><span class="mw-page-title-main">Artificial intelligence</span></span>
+          </h1>
+        </header>
+        <div id="mw-content-text" class="mw-body-content">
+          <p id="intro"><b>Artificial intelligence</b> (AI) is the capability of computational systems to perform tasks typically associated with human intelligence.</p>
+        </div>
+      </main>
+    `;
+
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 800 });
+    let articleVisible = false;
+    for (const [index, span] of document.querySelectorAll<HTMLElement>(".tool-link span").entries()) {
+      span.getBoundingClientRect = vi.fn(() => mockRect(20 + (index % 20) * 18));
+    }
+    const heading = document.querySelector("#firstHeading") as HTMLElement;
+    const intro = document.querySelector("#intro") as HTMLElement;
+    heading.getBoundingClientRect = vi.fn(() => articleVisible ? mockRect(120, 60) : mockRect(5000, 60));
+    intro.getBoundingClientRect = vi.fn(() => articleVisible ? mockRect(220, 120) : mockRect(5200, 120));
+
+    await runtime.toggle({ provider: "openai", proxyUrl: "http://proxy.test" });
+    await settleRuntime(40);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    articleVisible = true;
+    ControlledIntersectionObserver.trigger(heading);
+    ControlledIntersectionObserver.trigger(intro);
+    await settleRuntime(40);
+
+    firstFetch.resolve(translationResponse(bodies[0].segments, "first"));
+    await settleRuntime(80);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const secondRequestTexts = bodies[1].segments.map((segment) => segment.text);
+    expect(secondRequestTexts).toContain("Artificial intelligence");
+    expect(secondRequestTexts).toContain("Artificial intelligence (AI) is the capability of computational systems to perform tasks typically associated with human intelligence.");
+
+    secondFetch.resolve(translationResponse(bodies[1].segments, "second"));
+    await settleRuntime(80);
+  });
+
   it("keeps every dynamic root discovered within the debounce window", async () => {
     const fetchMock = mockTranslationFetch();
     const runtime = new TranslationRuntime();
@@ -368,6 +482,65 @@ describe("content translation runtime", () => {
     const texts = fetchMock.mock.calls.flatMap(([_url, init]) => requestSegments(init).map((segment) => segment.text));
     expect(texts).toContain("First dynamic paragraph has enough English words for translation.");
     expect(texts).toContain("Second dynamic paragraph has enough English words for translation.");
+  });
+
+  it("migrates an existing translation to a better owner when a rich-text root appears later", async () => {
+    const fetchMock = mockTranslationFetch();
+    const runtime = new TranslationRuntime();
+    document.body.innerHTML = `
+      <main>
+        <h2 id="heading">The five habits that get you there</h2>
+      </main>
+    `;
+
+    await runtime.toggle({ provider: "openai", proxyUrl: "http://proxy.test" });
+    await settleRuntime();
+
+    expect(document.querySelectorAll("#heading [data-translate-bot-translation]")).toHaveLength(1);
+
+    const heading = document.querySelector("#heading") as HTMLElement;
+    heading.replaceChildren();
+    const richTextRoot = document.createElement("div");
+    richTextRoot.id = "title-root";
+    richTextRoot.className = "public-DraftStyleDefault-block public-DraftStyleDefault-ltr";
+    richTextRoot.innerHTML = `<span><span data-text="true">The five habits that get you there</span></span>`;
+    heading.append(richTextRoot);
+
+    await settleRuntime();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(document.querySelectorAll("#heading [data-translate-bot-translation]")).toHaveLength(1);
+    expect(document.querySelectorAll("#title-root [data-translate-bot-translation]")).toHaveLength(1);
+    expect(heading.getAttribute("data-translate-bot-id")).toBeNull();
+    expect(richTextRoot.getAttribute("data-translate-bot-id")).toBeTruthy();
+  });
+
+  it("falls back to a remaining owner after a richer owner is removed", async () => {
+    const fetchMock = mockTranslationFetch();
+    const runtime = new TranslationRuntime();
+    document.body.innerHTML = `
+      <main>
+        <h2 id="heading">
+          <div id="title-root" class="public-DraftStyleDefault-block public-DraftStyleDefault-ltr">
+            <span><span data-text="true">The five habits that get you there</span></span>
+          </div>
+        </h2>
+      </main>
+    `;
+
+    await runtime.toggle({ provider: "openai", proxyUrl: "http://proxy.test" });
+    await settleRuntime();
+
+    const titleRoot = document.querySelector("#title-root") as HTMLElement;
+    titleRoot.remove();
+    const heading = document.querySelector("#heading") as HTMLElement;
+    heading.textContent = "The five habits that get you there";
+
+    await settleRuntime();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(document.querySelectorAll("#heading [data-translate-bot-translation]")).toHaveLength(1);
+    expect(heading.getAttribute("data-translate-bot-id")).toBeTruthy();
   });
 
   it("does not translate blocks explicitly marked as Chinese", async () => {
@@ -633,6 +806,38 @@ class FakeIntersectionObserver {
   observe = vi.fn();
   unobserve = vi.fn();
   disconnect = vi.fn();
+}
+
+class ControlledIntersectionObserver {
+  static instances: ControlledIntersectionObserver[] = [];
+  private readonly observed = new Set<Element>();
+
+  constructor(private readonly callback: IntersectionObserverCallback) {
+    ControlledIntersectionObserver.instances.push(this);
+  }
+
+  observe = vi.fn((target: Element) => {
+    this.observed.add(target);
+  });
+
+  unobserve = vi.fn((target: Element) => {
+    this.observed.delete(target);
+  });
+
+  disconnect = vi.fn(() => {
+    this.observed.clear();
+  });
+
+  static reset(): void {
+    ControlledIntersectionObserver.instances = [];
+  }
+
+  static trigger(target: Element): void {
+    for (const observer of ControlledIntersectionObserver.instances) {
+      if (!observer.observed.has(target)) continue;
+      observer.callback([{ target, isIntersecting: true } as IntersectionObserverEntry], observer as unknown as IntersectionObserver);
+    }
+  }
 }
 
 interface ProxyRequest {
