@@ -59,11 +59,57 @@ export function parseTranslationJson(raw: string, expectedIds: Set<string>): Arr
 
 /** 从可能被代码块或额外说明包裹的内容里，尽量提取 JSON 本体。 */
 function extractJson(text: string): string {
-  if (text.startsWith("{") && text.endsWith("}")) return text;
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
   if (fenced?.[1]) return fenced[1].trim();
-  const first = text.indexOf("{");
-  const last = text.lastIndexOf("}");
-  if (first >= 0 && last > first) return text.slice(first, last + 1);
+  const balanced = extractBalancedObject(text);
+  if (balanced) return balanced;
   return text;
+}
+
+/**
+ * 从一段夹杂说明文字的内容里，提取第一个完整 JSON 对象。
+ * 这里只做“括号配对 + 字符串转义”扫描，不尝试理解 JSON 语义，目的是把模型输出里 JSON 后面的尾巴切掉。
+ */
+function extractBalancedObject(text: string): string | undefined {
+  const start = text.indexOf("{");
+  if (start < 0) return undefined;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === "\"") inString = false;
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, index + 1);
+      if (depth < 0) return undefined;
+    }
+  }
+
+  return undefined;
 }

@@ -34,6 +34,11 @@ describe("translation prompt helpers", () => {
     expect(segments).toEqual([{ id: "a", translation: "打开设置面板。" }]);
   });
 
+  it("ignores trailing prose after a JSON object", () => {
+    const segments = parseTranslationJson('{"segments":[{"id":"a","translation":"打开设置面板。"}]} Thanks for the translation }', new Set(["a"]));
+    expect(segments).toEqual([{ id: "a", translation: "打开设置面板。" }]);
+  });
+
   it("rejects unexpected segment ids", () => {
     expect(() => parseTranslationJson('{"segments":[{"id":"b","translation":"错误"}]}', new Set(["a"]))).toThrow(/unexpected/);
   });

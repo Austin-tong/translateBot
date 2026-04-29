@@ -64,13 +64,57 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
 
-## 5. 写代码之前先切分支
+## 5. Codex 并行开发 Git 工作流
 
-**把每个分支当成是做开发的最小单元。**
+本项目可能同时运行多个 Codex/Agent 任务。为避免互相覆盖，每个任务都必须使用独立的 Git worktree 和独立分支。
 
-做代码改动之前，先创建一个分支，分支名称为对这个开发需求的简要描述。如：
+核心原则：
+
+- 一个任务对应一个 worktree
+- 一个任务对应一个分支
+- 当前任务只能修改自己的 worktree
+- 当前任务只能提交、推送、合并和清理自己的分支
+- 不得覆盖、删除或强推其他任务的 worktree 或分支
+
+### 任务开始
+
+开始开发前，先基于最新主分支为当前任务创建独立 worktree，并在该 worktree 中创建当前任务专属分支。
+
+分支名称为对这个开发需求的简要描述。如：
 - codex-add-login
 - codex-fix-login-err
+
+### 开发过程
+
+所有代码修改都必须发生在当前任务自己的 worktree 中。
+
+不要在主仓库目录或其他任务的 worktree 中改代码。
+
+提交前需要检查当前 Git 状态，确保只包含当前任务相关改动。不要提交临时文件、日志文件、构建产物或其他无关内容。
+
+### 推送
+
+任务完成后，只推送当前任务对应的分支。
+
+不得推送、覆盖或强推其他任务的分支。
+
+### 合并
+
+除非任务明确要求，否则不要自行合并到主分支。
+
+如果任务要求合并，只允许将当前任务分支合并回主分支。合并前应先同步最新主分支，并处理当前任务产生的冲突。
+
+### 清理
+
+任务完成并确认已推送或合并后，可以清理当前任务对应的 worktree 和分支。
+
+清理范围仅限当前任务自己的 worktree 和分支，不得影响其他任务。
+
+### 异常处理
+
+如果发现 worktree 或分支已存在、当前分支不符合预期、出现冲突、推送失败或 Git 状态异常，应先说明当前状态，再处理问题。
+
+不得通过覆盖、强推、删除其他分支或清理其他 worktree 的方式解决问题。
 
 ## 6. 写好中文注释
 
